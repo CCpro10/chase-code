@@ -32,16 +32,6 @@ func Run() {
 			fmt.Fprintf(os.Stderr, "shell 命令失败: %v\n", err)
 			os.Exit(1)
 		}
-	case "read":
-		if err := runRead(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "read 命令失败: %v\n", err)
-			os.Exit(1)
-		}
-	case "edit":
-		if err := runEdit(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "edit 命令失败: %v\n", err)
-			os.Exit(1)
-		}
 	case "repl":
 		if err := runRepl(); err != nil {
 			fmt.Fprintf(os.Stderr, "repl 退出: %v\n", err)
@@ -63,22 +53,16 @@ func usage() {
 用法:
   %[1]s                 # 直接进入 agent REPL（推荐）
   %[1]s shell [选项] -- <shell 命令字符串>
-  %[1]s read <文件路径>
-  %[1]s edit -file <文件路径> -from <旧串> -to <新串> [-all]
   %[1]s repl
 
 子命令说明:
   (无子命令)          进入基于 LLM+工具的 agent repl，默认使用 :agent 处理输入。
   shell                使用当前用户默认 shell 执行命令，默认启用 login shell。
-  read                 读取并打印代码文件内容，便于后续由 LLM 理解。
-  edit                 通过简单字符串替换编辑文件，模拟 Edit 工具能力。
-  repl                 进入交互式终端，在同一工作目录下多轮执行 agent/shell/read/edit。
+  repl                 进入交互式终端，在同一工作目录下多轮执行 agent/shell。
 
 示例:
   %[1]s
   %[1]s shell -- "ls -la"
-  %[1]s read ./main.go
-  %[1]s edit -file main.go -from "foo" -to "bar" -all
   %[1]s repl
 `, prog)
 }

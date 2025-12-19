@@ -21,6 +21,10 @@ const (
 	EventToolStarted     EventKind = "tool_started"      // 某个工具开始执行
 	EventToolOutputDelta EventKind = "tool_output_delta" // 工具输出的增量内容（当前一次性发送）
 	EventToolFinished    EventKind = "tool_finished"     // 某个工具执行结束
+
+	// 补丁审批相关
+	EventPatchApprovalRequest EventKind = "patch_approval_request" // 需要用户确认的补丁
+	EventPatchApprovalResult  EventKind = "patch_approval_result"  // 审批结果（日志用）
 )
 
 // Event 是从 server 发送给上层（例如 CLI）的统一事件结构。
@@ -38,6 +42,11 @@ type Event struct {
 	// Message 是通用文本载荷，例如 agent 的最终回答、
 	// 工具的输出内容、或“工具规划”的原始 JSON 等。
 	Message string `json:"message,omitempty"`
+
+	// RequestID 用于将一次补丁审批请求与用户的审批指令关联起来。
+	RequestID string `json:"request_id,omitempty"`
+	// Paths 是本次补丁涉及到的文件路径列表，用于给用户展示摘要。
+	Paths []string `json:"paths,omitempty"`
 }
 
 // EventSink 抽象一个事件下游。

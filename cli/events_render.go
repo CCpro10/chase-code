@@ -5,12 +5,14 @@ import (
 	"os"
 	"strings"
 
+	"chase-code/agent"
 	"chase-code/server"
 )
 
 // renderEvents 负责从事件通道中消费 server.Event，并以带颜色和缩进的形式
 // 渲染到终端上，模拟类似 codex-rs 的实时反馈体验。
-func renderEvents(ch <-chan server.Event) {
+// approvals 通道用于在收到补丁审批请求时，将用户的审批决策写回给 agent.Session。
+func renderEvents(ch <-chan server.Event, approvals chan<- agent.ApprovalDecision) {
 	for ev := range ch {
 		switch ev.Kind {
 		case server.EventTurnStarted:
@@ -41,6 +43,22 @@ func renderEvents(ch <-chan server.Event) {
 			} else if ev.ToolName != "" {
 				fmt.Fprintf(os.Stderr, "%s    [tool %s 完成]%s\n", colorYellow, ev.ToolName, colorReset)
 			}
+
+		case server.EventPatchApprovalRequest:
+			// 打印补丁审批请求摘要，用户可以直接输入 y/s 快速审批，或使用 :approve/:reject 命令确认
+			fmt.Fprintf(os.Stderr, "%s[apply_patch 审批请求]%s id=%s\n", colorMagenta, colorReset, ev.RequestID)
+			if len(ev.Paths) > 0 {
+				fmt.Fprintln(os.Stderr, "  涉及文件:")
+				for _, p := range ev.Paths {
+					fmt.Fprintf(os.Stderr, "    - %s\n", p)
+				}
+			}
+			if strings.TrimSpace(ev.Message) != "" {
+				fmt.Fprintf(os.Stderr, "  原因: %s\n", ev.Message)
+			}
+			fmt.Fprintf(os.Stderr, "%s  直接输入 y 批准，s 跳过；或使用 :approve %s / :reject %s。%s\n",
+				colorDim, ev.RequestID, ev.RequestID, colorReset)
+			setPendingApprovalID(ev.RequestID)
 
 		case server.EventAgentTextDone:
 			// 最终回答直接输出到 stdout，前面加一个前缀

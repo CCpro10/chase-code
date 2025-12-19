@@ -5,8 +5,8 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"chase-code/agent"
@@ -31,6 +31,27 @@ type replAgentSession struct {
 }
 
 var replAgent *replAgentSession
+
+var (
+	pendingApprovalMu sync.Mutex
+	pendingApprovalID string
+)
+
+// setPendingApprovalID 在收到补丁审批请求事件时记录当前待审批的请求ID。
+func setPendingApprovalID(id string) {
+	pendingApprovalMu.Lock()
+	defer pendingApprovalMu.Unlock()
+	pendingApprovalID = id
+}
+
+// consumePendingApprovalID 在用户通过快捷键 y/s 做出决策时，取出并清空当前待审批请求ID。
+func consumePendingApprovalID() string {
+	pendingApprovalMu.Lock()
+	defer pendingApprovalMu.Unlock()
+	id := pendingApprovalID
+	pendingApprovalID = ""
+	return id
+}
 
 func getOrInitReplAgent() (*replAgentSession, error) {
 	if replAgent != nil {
@@ -84,15 +105,10 @@ func getOrInitReplAgent() (*replAgentSession, error) {
 
 	// 创建事件通道和 Agent Session
 	events := make(chan server.Event, 128)
-	as := &agent.Session{
-		Client:   client,
-		Router:   router,
-		Sink:     server.ChanEventSink{Ch: events},
-		MaxSteps: maxSteps,
-	}
+	as := agent.NewSession(client, router, server.ChanEventSink{Ch: events}, maxSteps)
 
 	// 启动事件渲染 goroutine
-	go renderEvents(events)
+	go renderEvents(events, as.ApprovalsChan())
 
 	replAgent = &replAgentSession{
 		session:  as,
@@ -116,6 +132,25 @@ func runRepl() error {
 		}
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
+			continue
+		}
+
+		// 如果当前存在待审批的补丁请求，则支持直接输入 y / s 快捷审批。
+		if strings.EqualFold(line, "y") || strings.EqualFold(line, "s") {
+			if id := consumePendingApprovalID(); id != "" {
+				approved := strings.EqualFold(line, "y")
+				if err := sendApproval(id, approved); err != nil {
+					fmt.Fprintf(os.Stderr, "审批失败: %v\n", err)
+				}
+				continue
+			}
+			// 如果没有待审批请求，则按普通输入处理
+		}
+
+		if strings.HasPrefix(line, "/") {
+			if err := handleSlashCommand(line); err != nil {
+				fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+			}
 			continue
 		}
 
@@ -146,35 +181,11 @@ func handleReplCommand(line string) (err error) {
 	case "help":
 		printReplHelp()
 		return nil
-	case "read":
-		if len(fields) != 2 {
-			return fmt.Errorf("用法: :read <文件路径>")
-		}
-		return runRead([]string{fields[1]})
 	case "shell":
 		if len(fields) < 2 {
 			return fmt.Errorf("用法: :shell <命令>")
 		}
 		return runShell([]string{"--", strings.Join(fields[1:], " ")})
-	case "edit":
-		// :edit <file> <from> <to> [all]
-		if len(fields) < 4 {
-			return fmt.Errorf("用法: :edit <file> <from> <to> [all]")
-		}
-		file := fields[1]
-		from := fields[2]
-		to := fields[3]
-		all := len(fields) >= 5 && fields[4] == "all"
-
-		abs, err := filepath.Abs(file)
-		if err != nil {
-			return err
-		}
-		if err := servertools.ApplyEdit(abs, from, to, all); err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "已更新文件: %s\n", abs)
-		return nil
 	case "agent":
 		// :agent <指令>
 		rest := strings.TrimSpace(strings.TrimPrefix(line, ":agent"))
@@ -182,6 +193,16 @@ func handleReplCommand(line string) (err error) {
 			return fmt.Errorf("用法: :agent <任务描述>")
 		}
 		return runAgentTurn(rest)
+	case "approve":
+		if len(fields) != 2 {
+			return fmt.Errorf("用法: :approve <请求ID>")
+		}
+		return sendApproval(fields[1], true)
+	case "reject":
+		if len(fields) != 2 {
+			return fmt.Errorf("用法: :reject <请求ID>")
+		}
+		return sendApproval(fields[1], false)
 	default:
 		return fmt.Errorf("未知 repl 命令: %s", cmd)
 	}
@@ -213,9 +234,9 @@ func printReplHelp() {
   :help                显示帮助
   :q / :quit / :exit   退出 repl
   :shell <cmd>         通过用户默认 shell 执行命令
-  :read <file>         读取并打印文件内容
-  :edit <f> <from> <to> [all]  在文件中做字符串替换（all 表示替换全部）
   :agent <指令>        通过 LLM+工具自动完成一步任务
+  :approve <id>        批准指定补丁请求（来自 apply_patch）
+  :reject <id>         拒绝指定补丁请求
 
 默认行为:
   直接输入不以冒号开头的内容时，等价于 :agent <输入行>。`)
