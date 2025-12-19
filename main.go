@@ -2,7 +2,8 @@ package main
 
 import "chase-code/cli"
 
-// 程序入口，仅转交控制权给 cli 包。
+// main 是 chase-code 的入口函数。
+// 它负责把控制权转交给 cli 包，由 cli.Run() 完成后续命令行解析与执行。
 func main() {
 	cli.Run()
 }

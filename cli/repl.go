@@ -210,6 +210,9 @@ func runAgentTurn(userInput string) error {
 
 		// 解析成功，认为这是工具调用指令
 		if fromFallback {
+			// 保留模型输出的自然语言工具规划，方便用户观察内部决策过程。
+			fmt.Fprintln(os.Stderr, "[agent 内部工具规划]")
+			fmt.Println(reply)
 			fmt.Fprintln(os.Stderr, "[agent 工具调用（从自然语言解析）]")
 			for _, c := range calls {
 				fmt.Fprintf(os.Stderr, "  - %s\n", c.ToolName)
