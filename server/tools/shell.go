@@ -1,4 +1,4 @@
-package server
+package tools
 
 import (
 	"os"
@@ -10,15 +10,15 @@ import (
 type ShellKind string
 
 const (
-	ShellZsh    ShellKind = "zsh"
-	ShellBash   ShellKind = "bash"
-	ShellPwsh   ShellKind = "pwsh"
+	ShellZsh     ShellKind = "zsh"
+	ShellBash    ShellKind = "bash"
+	ShellPwsh    ShellKind = "pwsh"
 	ShellUnknown ShellKind = "unknown"
 )
 
 type Shell struct {
-	Kind       ShellKind
-	ShellPath  string
+	Kind        ShellKind
+	ShellPath   string
 	ProfilePath string
 }
 

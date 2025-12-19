@@ -1,41 +1,43 @@
-package server
+package tools
 
 import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"chase-code/server"
 )
 
 // ParseToolCallsJSON 解析 LLM 输出的 JSON 字符串，支持单个对象或对象数组。
-func ParseToolCallsJSON(raw string) ([]ToolCall, error) {
+func ParseToolCallsJSON(raw string) ([]server.ToolCall, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, fmt.Errorf("工具调用 JSON 为空")
 	}
 
 	if strings.HasPrefix(raw, "[") {
-		var calls []ToolCall
+		var calls []server.ToolCall
 		if err := json.Unmarshal([]byte(raw), &calls); err != nil {
 			return nil, err
 		}
 		return calls, nil
 	}
 
-	var call ToolCall
+	var call server.ToolCall
 	if err := json.Unmarshal([]byte(raw), &call); err != nil {
 		return nil, err
 	}
-	return []ToolCall{call}, nil
+	return []server.ToolCall{call}, nil
 }
 
 // DefaultToolSpecs 返回 chase-code 默认暴露给 LLM 的工具集合。
-func DefaultToolSpecs() []ToolSpec {
-	return []ToolSpec{
-		{Kind: ToolKindFunction, Name: "shell", Description: "执行 shell 命令。arguments: {\"command\": string, \"timeout_ms\"?: int, \"policy\"?: \"full\"|\"readonly\"|\"workspace\"}"},
-		{Kind: ToolKindFunction, Name: "read_file", Description: "读取文件内容。arguments: {\"path\": string, \"max_bytes\"?: int}"},
-		{Kind: ToolKindFunction, Name: "list_dir", Description: "列出目录内容。arguments: {\"path\": string}"},
-		{Kind: ToolKindFunction, Name: "grep_files", Description: "使用 ripgrep 在代码中查找匹配 pattern 的行，支持正则/模糊搜索。arguments: {\"root\": string, \"pattern\": string, \"max_matches\"?: int}"},
-		{Kind: ToolKindFunction, Name: "apply_patch", Description: "对单个文件应用简单补丁（基于字符串替换）。arguments: {\"file\": string, \"from\": string, \"to\": string, \"all\"?: bool}"},
+func DefaultToolSpecs() []server.ToolSpec {
+	return []server.ToolSpec{
+		{Kind: server.ToolKindFunction, Name: "shell", Description: "执行 shell 命令。arguments: {\"command\": string, \"timeout_ms\"?: int, \"policy\"?: \"full\"|\"readonly\"|\"workspace\"}"},
+		{Kind: server.ToolKindFunction, Name: "read_file", Description: "读取文件内容。arguments: {\"path\": string, \"max_bytes\"?: int}"},
+		{Kind: server.ToolKindFunction, Name: "list_dir", Description: "列出目录内容。arguments: {\"path\": string}"},
+		{Kind: server.ToolKindFunction, Name: "grep_files", Description: "使用 ripgrep 在代码中查找匹配 pattern 的行，支持正则/模糊搜索。arguments: {\"root\": string, \"pattern\": string, \"max_matches\"?: int}"},
+		{Kind: server.ToolKindFunction, Name: "apply_patch", Description: "对单个文件应用简单补丁（基于字符串替换）。arguments: {\"file\": string, \"from\": string, \"to\": string, \"all\"?: bool}"},
 	}
 }
 
@@ -43,7 +45,7 @@ func DefaultToolSpecs() []ToolSpec {
 // 模仿 codex 的 prompt engineering 风格，明确区分：
 //   - 需要继续调用工具时，只输出工具调用 JSON；
 //   - 已经可以回答用户时，直接输出自然语言答案。
-func BuildToolSystemPrompt(tools []ToolSpec) string {
+func BuildToolSystemPrompt(tools []server.ToolSpec) string {
 	var b strings.Builder
 
 	// 角色与目标

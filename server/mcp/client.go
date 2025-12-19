@@ -1,9 +1,10 @@
-package server
+package mcp
 
 import (
 	"context"
 	"encoding/json"
 
+	"chase-code/server"
 	gosdkclient "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -29,11 +30,11 @@ type MCPClient interface {
 
 // ToolSpecsFromMCP 将 MCPTool 列表转换为 chase-code 内部使用的 ToolSpec 列表，
 // 方便统一拼接到 DefaultToolSpecs 或自定义工具集合中。
-func ToolSpecsFromMCP(tools []MCPTool) []ToolSpec {
-	out := make([]ToolSpec, 0, len(tools))
+func ToolSpecsFromMCP(tools []MCPTool) []server.ToolSpec {
+	out := make([]server.ToolSpec, 0, len(tools))
 	for _, t := range tools {
-		out = append(out, ToolSpec{
-			Kind:        ToolKindCustom,
+		out = append(out, server.ToolSpec{
+			Kind:        server.ToolKindCustom,
 			Name:        t.Name,
 			Description: t.Description,
 			Parameters:  t.Parameters,
@@ -43,12 +44,12 @@ func ToolSpecsFromMCP(tools []MCPTool) []ToolSpec {
 }
 
 // GoSDKMCPClient 是对 github.com/mark3labs/mcp-go 客户端的一个适配器，
-// 实现了当前 server 包中的 MCPClient 接口，方便与 ToolRouter 集成。
+// 实现了当前 mcp 包中的 MCPClient 接口，方便与 ToolRouter 集成。
 type GoSDKMCPClient struct {
 	inner gosdkclient.MCPClient
 }
 
-// NewGoSDKMCPClient 将 go-sdk 的 MCPClient 包装为 server.MCPClient。
+// NewGoSDKMCPClient 将 go-sdk 的 MCPClient 包装为 mcp.MCPClient。
 func NewGoSDKMCPClient(inner gosdkclient.MCPClient) MCPClient {
 	return &GoSDKMCPClient{inner: inner}
 }

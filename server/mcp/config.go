@@ -1,4 +1,4 @@
-package server
+package mcp
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"chase-code/server"
 	gosdkclient "github.com/mark3labs/mcp-go/client"
 )
 
@@ -15,26 +16,25 @@ import (
 //
 // 示例 JSON 配置（多个 server）:
 //
-// {
-//   "servers": [
-//     {
-//       "name": "filesystem",
-//       "command": "mcp-filesystem",
-//       "args": ["--root", "/Users/me/project"],
-//       "env": ["FOO=bar"],
-//       "cwd": "/Users/me/project"
-//     }
-//   ]
-// }
+//	{
+//	  "servers": [
+//	    {
+//	      "name": "filesystem",
+//	      "command": "mcp-filesystem",
+//	      "args": ["--root", "/Users/me/project"],
+//	      "env": ["FOO=bar"],
+//	      "cwd": "/Users/me/project"
+//	    }
+//	  ]
+//	}
 //
 // chase-code 通过 go-sdk 创建 stdio MCP client 并与这些 server 通信。
-//
 type MCPServerConfig struct {
-	Name    string   `json:"name"`              // 在 LLM 工具名中使用的前缀/标识
-	Command string   `json:"command"`          // 可执行文件名，如 "mcp-filesystem" 或 "codex-mcp-server"
-	Args    []string `json:"args,omitempty"`   // 额外参数
-	Env     []string `json:"env,omitempty"`    // 传递给子进程的环境变量，默认继承 os.Environ
-	Cwd     string   `json:"cwd,omitempty"`    // 子进程工作目录，不填则使用当前 cwd
+	Name    string   `json:"name"`           // 在 LLM 工具名中使用的前缀/标识
+	Command string   `json:"command"`        // 可执行文件名，如 "mcp-filesystem" 或 "codex-mcp-server"
+	Args    []string `json:"args,omitempty"` // 额外参数
+	Env     []string `json:"env,omitempty"`  // 传递给子进程的环境变量，默认继承 os.Environ
+	Cwd     string   `json:"cwd,omitempty"`  // 子进程工作目录，不填则使用当前 cwd
 }
 
 // MCPConfig 是顶层 MCP 配置。
@@ -99,7 +99,7 @@ func NewMCPClientsFromConfig(cfg *MCPConfig) ([]MCPClient, error) {
 }
 
 // MergeMCPTools 使用多个 MCPClient 拉取工具列表，并合并为 MCPTool/ToolSpec。
-func MergeMCPTools(ctx context.Context, clients []MCPClient) ([]MCPTool, []ToolSpec, error) {
+func MergeMCPTools(ctx context.Context, clients []MCPClient) ([]MCPTool, []server.ToolSpec, error) {
 	if len(clients) == 0 {
 		return nil, nil, nil
 	}

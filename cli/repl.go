@@ -10,11 +10,13 @@ import (
 	"time"
 
 	"chase-code/server"
+	servermcp "chase-code/server/mcp"
+	servertools "chase-code/server/tools"
 )
 
 type replAgentSession struct {
 	client   server.LLMClient
-	router   *server.ToolRouter
+	router   *servertools.ToolRouter
 	messages []server.Message
 }
 
@@ -35,8 +37,8 @@ func getOrInitReplAgent() (*replAgentSession, error) {
 	}
 
 	// 1. 基础本地工具
-	tools := server.DefaultToolSpecs()
-	router := server.NewToolRouter(tools)
+	tools := servertools.DefaultToolSpecs()
+	router := servertools.NewToolRouter(tools)
 
 	// 2. 可选：通过配置接入 MCP tools（仿照 codex 的 mcp-server 能力）
 	// 配置路径通过环境变量 CHASE_CODE_MCP_CONFIG 指定，格式为 JSON：
@@ -49,26 +51,26 @@ func getOrInitReplAgent() (*replAgentSession, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		if mcpCfg, err := server.LoadMCPConfig(cfgPath); err != nil {
+		if mcpCfg, err := servermcp.LoadMCPConfig(cfgPath); err != nil {
 			fmt.Fprintf(os.Stderr, "加载 MCP 配置失败: %v\n", err)
 		} else if mcpCfg != nil {
-			clients, err := server.NewMCPClientsFromConfig(mcpCfg)
+			clients, err := servermcp.NewMCPClientsFromConfig(mcpCfg)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "创建 MCP 客户端失败: %v\n", err)
 			} else if len(clients) > 0 {
-				_, mcpSpecs, err := server.MergeMCPTools(ctx, clients)
+				_, mcpSpecs, err := servermcp.MergeMCPTools(ctx, clients)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "获取 MCP tools 列表失败: %v\n", err)
 				} else {
 					// 将 MCP tools 追加到工具列表，并用带 MCP 的 router 替换本地 router。
 					tools = append(tools, mcpSpecs...)
-					router = server.NewToolRouterWithMCP(tools, server.MultiMCPClient(clients))
+					router = servertools.NewToolRouterWithMCP(tools, servermcp.MultiMCPClient(clients))
 				}
 			}
 		}
 	}
 
-	systemPrompt := server.BuildToolSystemPrompt(router.Specs())
+	systemPrompt := servertools.BuildToolSystemPrompt(router.Specs())
 
 	replAgent = &replAgentSession{
 		client:   client,
@@ -146,7 +148,7 @@ func handleReplCommand(line string) (err error) {
 		if err != nil {
 			return err
 		}
-		if err := server.ApplyEdit(abs, from, to, all); err != nil {
+		if err := servertools.ApplyEdit(abs, from, to, all); err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "已更新文件: %s\n", abs)
@@ -192,7 +194,7 @@ func runAgentTurn(userInput string) error {
 		reply := res.Message.Content
 
 		// 尝试将回复解析为工具调用 JSON
-		calls, err := server.ParseToolCallsJSON(reply)
+		calls, err := servertools.ParseToolCallsJSON(reply)
 		fromFallback := false
 		if err != nil {
 			// 解析失败时，尝试从自然语言中提取“调用工具 X，参数: {...}”这种模式，

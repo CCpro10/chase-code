@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"chase-code/server"
+	servertools "chase-code/server/tools"
 )
 
 // Run 是 chase-code 的 CLI 入口，负责解析子命令并调用 server 包的核心逻辑。
@@ -83,13 +83,13 @@ func usage() {
 `, prog)
 }
 
-// runShell 解析 shell 子命令参数并调用 server.RunExec。
+// runShell 解析 shell 子命令参数并调用 tools.RunExec。
 func runShell(args []string) error {
 	fs := flag.NewFlagSet("shell", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
 	timeout := fs.Duration("timeout", 10*time.Second, "命令超时时间，如 5s、2m；0 表示不设置超时")
-	policyStr := fs.String("policy", string(server.SandboxWorkspaceWrite), "沙箱策略: full|readonly|workspace")
+	policyStr := fs.String("policy", string(servertools.SandboxWorkspaceWrite), "沙箱策略: full|readonly|workspace")
 	loginShell := fs.Bool("login", true, "是否使用 login shell (-lc/-l) 来执行命令")
 
 	// chase-code shell [flags] -- <command string>
@@ -121,13 +121,13 @@ func runShell(args []string) error {
 	}
 	commandStr := strings.Join(cmdParts, " ")
 
-	policy, err := server.ParseSandboxPolicy(*policyStr)
+	policy, err := servertools.ParseSandboxPolicy(*policyStr)
 	if err != nil {
 		return err
 	}
 
-	shell := server.DetectUserShell()
-	if shell.Kind == server.ShellUnknown {
+	shell := servertools.DetectUserShell()
+	if shell.Kind == servertools.ShellUnknown {
 		return fmt.Errorf("无法自动检测用户 shell，请显式指定命令，如: bash -lc '...'")
 	}
 
@@ -138,14 +138,14 @@ func runShell(args []string) error {
 		return fmt.Errorf("获取当前工作目录失败: %w", err)
 	}
 
-	params := server.ExecParams{
+	params := servertools.ExecParams{
 		Command: shellArgs,
 		Cwd:     cwd,
 		Timeout: *timeout,
 		Env:     os.Environ(),
 	}
 
-	result, err := server.RunExec(params, policy)
+	result, err := servertools.RunExec(params, policy)
 	if err != nil {
 		return err
 	}
@@ -159,14 +159,14 @@ func runShell(args []string) error {
 	return nil
 }
 
-// runRead 使用 server.ReadFileLimited 读取文件内容。
+// runRead 使用 tools.ReadFileLimited 读取文件内容。
 func runRead(args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("用法: chase-code read <文件路径>")
 	}
 	path := args[0]
 
-	data, err := server.ReadFileLimited(path, 512*1024)
+	data, err := servertools.ReadFileLimited(path, 512*1024)
 	if err != nil {
 		return err
 	}
@@ -178,7 +178,7 @@ func runRead(args []string) error {
 	return nil
 }
 
-// runEdit 使用 server.ApplyEdit 模拟 Edit 工具对代码的修改能力。
+// runEdit 使用 tools.ApplyEdit 模拟 Edit 工具对代码的修改能力。
 func runEdit(args []string) error {
 	fs := flag.NewFlagSet("edit", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -201,7 +201,7 @@ func runEdit(args []string) error {
 		return fmt.Errorf("解析文件路径失败: %w", err)
 	}
 
-	if err := server.ApplyEdit(abs, *from, *to, *replaceAll); err != nil {
+	if err := servertools.ApplyEdit(abs, *from, *to, *replaceAll); err != nil {
 		return err
 	}
 
