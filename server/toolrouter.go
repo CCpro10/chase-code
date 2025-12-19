@@ -204,6 +204,40 @@ type listDirArgs struct {
 	Path string `json:"path"`
 }
 
+func (r *ToolRouter) execListDir(call ToolCall) (ResponseItem, error) {
+	var args listDirArgs
+	if err := json.Unmarshal(call.Arguments, &args); err != nil {
+		return ResponseItem{}, fmt.Errorf("解析 list_dir 参数失败: %w", err)
+	}
+	if strings.TrimSpace(args.Path) == "" {
+		return ResponseItem{}, fmt.Errorf("list_dir 需要 path 字段")
+	}
+
+	entries, err := os.ReadDir(args.Path)
+	if err != nil {
+		return ResponseItem{}, fmt.Errorf("读取目录失败: %w", err)
+	}
+
+	var b strings.Builder
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() {
+			name += "/"
+		}
+		fmt.Fprintln(&b, name)
+	}
+
+	return ResponseItem{Type: ResponseItemToolResult, ToolName: "list_dir", ToolOutput: b.String()}, nil
+}
+
+// ---------------- grep_files ----------------
+
+type grepFilesArgs struct {
+	Root       string `json:"root"`
+	Pattern    string `json:"pattern"`
+	MaxMatches int    `json:"max_matches,omitempty"`
+}
+
 func (r *ToolRouter) execGrepFiles(call ToolCall) (ResponseItem, error) {
 	var args grepFilesArgs
 	if err := json.Unmarshal(call.Arguments, &args); err != nil {
@@ -296,34 +330,4 @@ func runRipgrep(root, pattern string, maxMatches int) (string, error) {
 		return "", err
 	}
 	return string(out), nil
-}
-
-// ---------------- apply_patch ----------------
-
-type applyPatchArgs struct {
-	File string `json:"file"`
-	From string `json:"from"`
-	To   string `json:"to"`
-	All  bool   `json:"all,omitempty"`
-}
-
-func (r *ToolRouter) execApplyPatch(call ToolCall) (ResponseItem, error) {
-	var args applyPatchArgs
-	if err := json.Unmarshal(call.Arguments, &args); err != nil {
-		return ResponseItem{}, fmt.Errorf("解析 apply_patch 参数失败: %w", err)
-	}
-	if strings.TrimSpace(args.File) == "" || strings.TrimSpace(args.From) == "" {
-		return ResponseItem{}, fmt.Errorf("apply_patch 需要 file 和 from 字段")
-	}
-
-	abs, err := filepath.Abs(args.File)
-	if err != nil {
-		return ResponseItem{}, fmt.Errorf("解析文件路径失败: %w", err)
-	}
-	if err := ApplyEdit(abs, args.From, args.To, args.All); err != nil {
-		return ResponseItem{}, err
-	}
-
-	msg := fmt.Sprintf("apply_patch 已更新文件: %s", abs)
-	return ResponseItem{Type: ResponseItemToolResult, ToolName: "apply_patch", ToolOutput: msg}, nil
 }

@@ -164,6 +164,8 @@ func handleReplCommand(line string) (err error) {
 	return nil
 }
 
+const maxSteps = 10
+
 func runAgentTurn(userInput string) error {
 	sess, err := getOrInitReplAgent()
 	if err != nil {
@@ -174,7 +176,6 @@ func runAgentTurn(userInput string) error {
 	sess.messages = append(sess.messages, server.Message{Role: server.RoleUser, Content: userInput})
 
 	// 为防止死循环，这里限制最多连续进行若干步工具调用 + 回复
-	const maxSteps = 4
 
 	baseCtx := context.Background()
 
@@ -192,11 +193,13 @@ func runAgentTurn(userInput string) error {
 
 		// 尝试将回复解析为工具调用 JSON
 		calls, err := server.ParseToolCallsJSON(reply)
+		fromFallback := false
 		if err != nil {
 			// 解析失败时，尝试从自然语言中提取“调用工具 X，参数: {...}”这种模式，
 			// 以兼容模型没有严格遵守“只输出 JSON”的情况。
 			if fallbackCalls, ok := parseToolCallsFromText(reply); ok {
 				calls = fallbackCalls
+				fromFallback = true
 			} else {
 				fmt.Fprintln(os.Stderr, "[agent 回复]")
 				fmt.Println(reply)
@@ -206,8 +209,15 @@ func runAgentTurn(userInput string) error {
 		}
 
 		// 解析成功，认为这是工具调用指令
-		fmt.Fprintln(os.Stderr, "[agent 工具调用 JSON]")
-		fmt.Fprintln(os.Stderr, reply)
+		if fromFallback {
+			fmt.Fprintln(os.Stderr, "[agent 工具调用（从自然语言解析）]")
+			for _, c := range calls {
+				fmt.Fprintf(os.Stderr, "  - %s\n", c.ToolName)
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, "[agent 工具调用 JSON]")
+			fmt.Fprintln(os.Stderr, reply)
+		}
 
 		// 依次执行所有工具调用，并把结果写回对话历史
 		for _, c := range calls {

@@ -111,6 +111,8 @@ func BuildToolSystemPrompt(tools []ToolSpec) string {
 	b.WriteString("记住：\n")
 	b.WriteString("- 当你输出 JSON 时，只能有 JSON，没有任何自然语言。\n")
 	b.WriteString("- 当你输出自然语言回答时，不能再嵌入工具 JSON。\n")
+	b.WriteString("- 最终给用户的自然语言回答中，禁止出现类似 '调用工具 xxx，参数: {...}' 这样的说明性句子；如果需要说明你用过哪些工具，请用自然语言概括，例如：'我刚才用 read_file 查看了 go.mod 的内容'。\n")
+	b.WriteString("- 任何 '调用工具 …，参数: …' 之类的话，都是你内部规划工具调用时的思考过程，不应该直接展示给用户。\n")
 
 	return b.String()
 }
