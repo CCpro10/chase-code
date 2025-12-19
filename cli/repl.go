@@ -9,15 +9,25 @@ import (
 	"strings"
 	"time"
 
+	"chase-code/agent"
 	"chase-code/server"
 	servermcp "chase-code/server/mcp"
 	servertools "chase-code/server/tools"
 )
 
+const (
+	colorReset   = "\033[0m"
+	colorDim     = "\033[2m"
+	colorCyan    = "\033[36m"
+	colorYellow  = "\033[33m"
+	colorGreen   = "\033[32m"
+	colorMagenta = "\033[35m"
+)
+
 type replAgentSession struct {
-	client   server.LLMClient
-	router   *servertools.ToolRouter
+	session  *agent.Session
 	messages []server.Message
+	events   chan server.Event
 }
 
 var replAgent *replAgentSession
@@ -72,10 +82,22 @@ func getOrInitReplAgent() (*replAgentSession, error) {
 
 	systemPrompt := servertools.BuildToolSystemPrompt(router.Specs())
 
+	// 创建事件通道和 Agent Session
+	events := make(chan server.Event, 128)
+	as := &agent.Session{
+		Client:   client,
+		Router:   router,
+		Sink:     server.ChanEventSink{Ch: events},
+		MaxSteps: maxSteps,
+	}
+
+	// 启动事件渲染 goroutine
+	go renderEvents(events)
+
 	replAgent = &replAgentSession{
-		client:   client,
-		router:   router,
+		session:  as,
 		messages: []server.Message{{Role: server.RoleSystem, Content: systemPrompt}},
+		events:   events,
 	}
 	return replAgent, nil
 }
@@ -87,7 +109,7 @@ func runRepl() error {
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
-		fmt.Fprint(os.Stderr, "chase> ")
+		fmt.Fprintf(os.Stderr, "%schase> %s", colorCyan, colorReset)
 		if !scanner.Scan() {
 			fmt.Fprintln(os.Stderr)
 			return nil
@@ -106,7 +128,7 @@ func runRepl() error {
 
 		// 默认当成 agent 指令执行（而不是 shell 命令）。
 		if err := runAgentTurn(line); err != nil {
-			fmt.Fprintf(os.Stderr, "agent 执行失败: %v\n", err)
+			fmt.Fprintf(os.Stderr, "%sagent 执行失败: %v%s\n", colorYellow, err, colorReset)
 		}
 	}
 }
@@ -174,76 +196,15 @@ func runAgentTurn(userInput string) error {
 		return err
 	}
 
-	// 将本轮用户输入记录到对话历史
-	sess.messages = append(sess.messages, server.Message{Role: server.RoleUser, Content: userInput})
-
-	// 为防止死循环，这里限制最多连续进行若干步工具调用 + 回复
-
 	baseCtx := context.Background()
+	ctx, cancel := context.WithTimeout(baseCtx, 60*time.Second)
+	defer cancel()
 
-	for step := 0; step < maxSteps; step++ {
-		// 用当前历史构造 Prompt
-		prompt := server.Prompt{Messages: sess.messages}
-
-		ctx, cancel := context.WithTimeout(baseCtx, 60*time.Second)
-		res, err := sess.client.Complete(ctx, prompt)
-		cancel()
-		if err != nil {
-			return err
-		}
-		reply := res.Message.Content
-
-		// 尝试将回复解析为工具调用 JSON
-		calls, err := servertools.ParseToolCallsJSON(reply)
-		fromFallback := false
-		if err != nil {
-			// 解析失败时，尝试从自然语言中提取“调用工具 X，参数: {...}”这种模式，
-			// 以兼容模型没有严格遵守“只输出 JSON”的情况。
-			if fallbackCalls, ok := parseToolCallsFromText(reply); ok {
-				calls = fallbackCalls
-				fromFallback = true
-			} else {
-				fmt.Fprintln(os.Stderr, "[agent 回复]")
-				fmt.Println(reply)
-				sess.messages = append(sess.messages, server.Message{Role: server.RoleAssistant, Content: reply})
-				return nil
-			}
-		}
-
-		// 解析成功，认为这是工具调用指令
-		if fromFallback {
-			// 保留模型输出的自然语言工具规划，方便用户观察内部决策过程。
-			fmt.Fprintln(os.Stderr, "[agent 内部工具规划]")
-			fmt.Println(reply)
-			fmt.Fprintln(os.Stderr, "[agent 工具调用（从自然语言解析）]")
-			for _, c := range calls {
-				fmt.Fprintf(os.Stderr, "  - %s\n", c.ToolName)
-			}
-		} else {
-			fmt.Fprintln(os.Stderr, "[agent 工具调用 JSON]")
-			fmt.Fprintln(os.Stderr, reply)
-		}
-
-		// 依次执行所有工具调用，并把结果写回对话历史
-		for _, c := range calls {
-			item, err := sess.router.Execute(ctx, c)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "工具 %s 执行失败: %v\n", c.ToolName, err)
-				continue
-			}
-			fmt.Fprintf(os.Stderr, "[tool %s 输出]\n", c.ToolName)
-			fmt.Println(item.ToolOutput)
-
-			// 把工具结果写回对话历史，便于后续多轮推理。
-			sess.messages = append(sess.messages,
-				server.Message{Role: server.RoleAssistant, Content: fmt.Sprintf("工具 %s 的输出:\n%s", item.ToolName, item.ToolOutput)},
-			)
-		}
-
-		// 本轮结束后，继续下一轮循环，LLM 将在新的历史基础上决定是再次调用工具还是直接给出回答
+	newHistory, err := sess.session.RunTurn(ctx, userInput, sess.messages)
+	if err != nil {
+		return err
 	}
-
-	fmt.Fprintln(os.Stderr, "agent 工具调用已达到最大步数，停止。")
+	sess.messages = newHistory
 	return nil
 }
 
