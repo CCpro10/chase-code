@@ -31,13 +31,136 @@ func ParseToolCallsJSON(raw string) ([]server.ToolCall, error) {
 }
 
 // DefaultToolSpecs 返回 chase-code 默认暴露给 LLM 的工具集合。
+var (
+	toolParamsShell = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "command": {
+      "type": "string",
+      "description": "要执行的 shell 命令（在用户工作目录下）"
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "description": "超时时间（毫秒，可选，默认 60000）",
+      "minimum": 1
+    },
+    "policy": {
+      "type": "string",
+      "description": "命令权限策略：full=不限制；readonly=只读；workspace=仅允许当前工程目录",
+      "enum": ["full", "readonly", "workspace"]
+    }
+  },
+  "required": ["command"],
+  "additionalProperties": false
+}`)
+
+	toolParamsReadFile = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "要读取的文件路径（相对或绝对路径）"
+    },
+    "max_bytes": {
+      "type": "integer",
+      "description": "最大读取字节数（可选，不填则读取整个文件）",
+      "minimum": 1
+    }
+  },
+  "required": ["path"],
+  "additionalProperties": false
+}`)
+
+	toolParamsListDir = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "要列出的目录路径（相对或绝对路径）"
+    }
+  },
+  "required": ["path"],
+  "additionalProperties": false
+}`)
+
+	toolParamsGrepFiles = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "root": {
+      "type": "string",
+      "description": "搜索的根目录路径"
+    },
+    "pattern": {
+      "type": "string",
+      "description": "要匹配的正则或文本模式"
+    },
+    "max_matches": {
+      "type": "integer",
+      "description": "最大匹配行数（可选）",
+      "minimum": 1
+    }
+  },
+  "required": ["root", "pattern"],
+  "additionalProperties": false
+}`)
+
+	toolParamsApplyPatch = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "file": {
+      "type": "string",
+      "description": "要修改的文件路径（相对或绝对路径）"
+    },
+    "from": {
+      "type": "string",
+      "description": "待替换的原始字符串（必须能在文件中找到）"
+    },
+    "to": {
+      "type": "string",
+      "description": "替换后的新字符串"
+    },
+    "all": {
+      "type": "boolean",
+      "description": "是否替换文件中出现的所有 from；默认只允许唯一一次匹配"
+    }
+  },
+  "required": ["file", "from", "to"],
+  "additionalProperties": false
+}`)
+)
+
 func DefaultToolSpecs() []server.ToolSpec {
 	return []server.ToolSpec{
-		{Kind: server.ToolKindFunction, Name: "shell", Description: "执行 shell 命令。arguments: {\"command\": string, \"timeout_ms\"?: int, \"policy\"?: \"full\"|\"readonly\"|\"workspace\"}"},
-		{Kind: server.ToolKindFunction, Name: "read_file", Description: "读取文件内容。arguments: {\"path\": string, \"max_bytes\"?: int}"},
-		{Kind: server.ToolKindFunction, Name: "list_dir", Description: "列出目录内容。arguments: {\"path\": string}"},
-		{Kind: server.ToolKindFunction, Name: "grep_files", Description: "使用 ripgrep 在代码中查找匹配 pattern 的行，支持正则/模糊搜索。arguments: {\"root\": string, \"pattern\": string, \"max_matches\"?: int}"},
-		{Kind: server.ToolKindFunction, Name: "apply_patch", Description: "对单个文件应用简单补丁（基于字符串替换）。arguments: {\"file\": string, \"from\": string, \"to\": string, \"all\"?: bool}"},
+		{
+			Kind:        server.ToolKindFunction,
+			Name:        "shell",
+			Description: "执行 shell 命令。",
+			Parameters:  toolParamsShell,
+		},
+		{
+			Kind:        server.ToolKindFunction,
+			Name:        "read_file",
+			Description: "读取文件内容。",
+			Parameters:  toolParamsReadFile,
+		},
+		{
+			Kind:        server.ToolKindFunction,
+			Name:        "list_dir",
+			Description: "列出目录内容。",
+			Parameters:  toolParamsListDir,
+		},
+		{
+			Kind:        server.ToolKindFunction,
+			Name:        "grep_files",
+			Description: "使用 ripgrep 在代码中查找匹配行。",
+			Parameters:  toolParamsGrepFiles,
+		},
+		{
+			Kind:        server.ToolKindFunction,
+			Name:        "apply_patch",
+			Description: "对单个文件应用简单补丁（基于字符串替换）。",
+			Parameters:  toolParamsApplyPatch,
+		},
 	}
 }
 
@@ -97,7 +220,7 @@ func BuildToolSystemPrompt(tools []server.ToolSpec) string {
 	// 工具列表
 	b.WriteString("=== 可用工具列表 ===\n")
 	for i, t := range tools {
-		fmt.Fprintf(&b, "%d. %s — %s\n", i+1, t.Name, t.Description)
+		fmt.Fprintf(&b, "%d. %s — %s - %s\n", i+1, t.Name, t.Description, string(t.Parameters))
 	}
 	b.WriteString("\n")
 
