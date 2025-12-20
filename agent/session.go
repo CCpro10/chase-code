@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"chase-code/server"
@@ -53,11 +54,11 @@ func (s *Session) ApprovalsChan() chan<- ApprovalDecision {
 }
 
 // RunTurn 执行一轮用户指令：
-//   - 先将 userInput 追加到历史消息中；
+//   - 先将 userInput 追加到历史中（以 ResponseItem 形式管理）；
 //   - 在最多 MaxSteps 步内，反复调用 LLM 和工具；
 //   - 当 LLM 不再返回工具调用 JSON 时，将其视为最终回答并结束。
 //
-// 返回更新后的对话历史。
+// 返回更新后的对话历史（仍然是 []server.Message，以兼容现有调用方）。
 func (s *Session) RunTurn(ctx context.Context, userInput string, history []server.Message) ([]server.Message, error) {
 	if s == nil || s.Client == nil || s.Router == nil {
 		return history, nil
@@ -68,7 +69,25 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 		maxSteps = 10
 	}
 
-	msgs := append(history, server.Message{Role: server.RoleUser, Content: userInput})
+	// 1) 将旧的 []Message 历史转换为 []ResponseItem
+	historyItems := make([]server.ResponseItem, 0, len(history)+1)
+	for _, m := range history {
+		historyItems = append(historyItems, server.ResponseItem{
+			Type: server.ResponseItemMessage,
+			Role: m.Role,
+			Text: m.Content,
+		})
+	}
+
+	// 2) 追加本轮用户输入
+	historyItems = append(historyItems, server.ResponseItem{
+		Type: server.ResponseItemMessage,
+		Role: server.RoleUser,
+		Text: userInput,
+	})
+
+	cm := server.NewContextManager(historyItems)
+
 	log.Printf("[agent] new turn input=%q history_len=%d", userInput, len(history))
 
 	if s.Sink != nil {
@@ -85,11 +104,14 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 		if s.Sink != nil {
 			s.Sink.SendEvent(server.Event{Kind: server.EventAgentThinking, Time: time.Now(), Step: step})
 		}
-		log.Printf("[agent] step=%d calling LLM (history_len=%d)", step, len(msgs))
 
-		// function calling 默认开启：始终将 ToolSpec 列表传给 LLM，
-		// 由 llm.go 根据 ToolSpec.Parameters 构造 OpenAI tools 数组。
-		prompt := server.Prompt{Messages: msgs, Tools: s.Router.Specs()}
+		// 每一轮根据当前历史构造 Prompt
+		prompt := server.Prompt{
+			Messages: cm.BuildPromptMessages(),
+			Tools:    s.Router.Specs(),
+		}
+
+		log.Printf("[agent] step=%d calling LLM (history_items=%d, prompt_msgs=%d)", step, len(cm.History()), len(prompt.Messages))
 
 		// 为本次 LLM 调用单独设置超时，避免影响后续工具执行/审批流程。
 		llmCtx, cancelLLM := context.WithTimeout(baseCtx, 60*time.Second)
@@ -97,10 +119,13 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 		cancelLLM()
 		if err != nil {
 			log.Printf("[agent] step=%d LLM error: %v", step, err)
-			return msgs, err
+			// 失败时直接返回当前折叠后的历史
+			return itemsToMessages(cm.History()), err
 		}
+
 		reply := res.Message.Content
 		log.Printf("[agent] step=%d LLM reply_len=%d tool_calls=%d", step, len(reply), len(res.ToolCalls))
+		log.Printf("[agent] step=%d LLM reply preview:\n%s", step, previewLLMReplyForLog(reply))
 
 		var calls []server.ToolCall
 		if len(res.ToolCalls) > 0 {
@@ -126,8 +151,15 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 				})
 				s.Sink.SendEvent(server.Event{Kind: server.EventTurnFinished, Time: time.Now(), Step: step})
 			}
-			msgs = append(msgs, server.Message{Role: server.RoleAssistant, Content: reply})
-			return msgs, nil
+
+			// 记录 assistant 最终回答到历史
+			cm.Record(server.ResponseItem{
+				Type: server.ResponseItemMessage,
+				Role: server.RoleAssistant,
+				Text: reply,
+			})
+
+			return itemsToMessages(cm.History()), nil
 		}
 
 		// 有工具调用时，先发送“规划”事件，方便 CLI 展示原始 JSON 或 function 调用情况
@@ -142,9 +174,17 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 		log.Printf("[agent] step=%d resolved %d tool_calls", step, len(calls))
 
 		// 3) 依次执行所有工具调用，将输出写回历史，供下一轮 LLM 使用
-		// 工具执行和审批流程使用 baseCtx，以避免受 LLM 超时影响。
+		//    工具执行和审批流程使用 baseCtx，以避免受 LLM 超时影响。
 		for _, c := range calls {
 			log.Printf("[agent] step=%d executing tool=%s", step, c.ToolName)
+
+			// 3.1 先记录工具调用本身
+			cm.Record(server.ResponseItem{
+				Type:          server.ResponseItemToolCall,
+				ToolName:      c.ToolName,
+				ToolArguments: c.Arguments,
+			})
+
 			var item server.ResponseItem
 			var execErr error
 			toolCtx := baseCtx
@@ -153,6 +193,7 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 			} else {
 				item, execErr = s.Router.Execute(toolCtx, c)
 			}
+
 			if execErr != nil {
 				if s.Sink != nil {
 					s.Sink.SendEvent(server.Event{
@@ -164,11 +205,14 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 					})
 				}
 				log.Printf("[agent] step=%d tool=%s error=%v", step, c.ToolName, execErr)
-				// 同时把失败信息写回对话历史，避免模型误以为工具执行成功。
-				msgs = append(msgs, server.Message{
-					Role:    server.RoleAssistant,
-					Content: fmt.Sprintf("工具 %s 执行失败: %v", c.ToolName, execErr),
+
+				// 同时把失败信息写回历史，避免模型误以为工具执行成功。
+				cm.Record(server.ResponseItem{
+					Type:       server.ResponseItemToolResult,
+					ToolName:   c.ToolName,
+					ToolOutput: fmt.Sprintf("工具执行失败: %v", execErr),
 				})
+
 				continue
 			}
 
@@ -189,10 +233,13 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 			}
 			log.Printf("[agent] step=%d tool=%s done output_len=%d", step, c.ToolName, len(item.ToolOutput))
 
-			// 把工具结果写回对话历史，便于后续 LLM 使用
-			msgs = append(msgs,
-				server.Message{Role: server.RoleAssistant, Content: "工具 " + item.ToolName + " 的输出:\n" + item.ToolOutput},
-			)
+			// 3.2 把工具结果以 ResponseItem 形式写回历史，
+			//      实际暴露给模型时由 ContextManager 统一包装 + 截断。
+			cm.Record(server.ResponseItem{
+				Type:       server.ResponseItemToolResult,
+				ToolName:   item.ToolName,
+				ToolOutput: item.ToolOutput,
+			})
 		}
 	}
 
@@ -205,7 +252,49 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 			Message: "达到最大步数，终止",
 		})
 	}
-	return msgs, nil
+
+	return itemsToMessages(cm.History()), nil
+}
+
+// itemsToMessages 将 ResponseItem 历史折叠回旧的 []server.Message 形式，
+// 只保留 Type=message 的条目，确保对外行为兼容。
+func itemsToMessages(items []server.ResponseItem) []server.Message {
+	msgs := make([]server.Message, 0, len(items))
+	for _, it := range items {
+		if it.Type != server.ResponseItemMessage {
+			continue
+		}
+		msgs = append(msgs, server.Message{
+			Role:    it.Role,
+			Content: it.Text,
+		})
+	}
+	return msgs
+}
+
+const (
+	llmReplyPreviewMaxRunes = 1024
+	llmReplyPreviewMaxLines = 20
+)
+
+// previewLLMReplyForLog 对 LLM 回复做简单截断，避免日志过长。
+func previewLLMReplyForLog(s string) string {
+	if s == "" {
+		return s
+	}
+
+	runes := []rune(s)
+	if len(runes) > llmReplyPreviewMaxRunes {
+		runes = runes[:llmReplyPreviewMaxRunes]
+	}
+	truncated := string(runes)
+
+	lines := strings.Split(truncated, "\n")
+	if len(lines) > llmReplyPreviewMaxLines {
+		lines = append(lines[:llmReplyPreviewMaxLines], "...(LLM reply 已截断)")
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // executeApplyPatchWithSafety 对 apply_patch 调用进行安全评估和必要的人工审批，
