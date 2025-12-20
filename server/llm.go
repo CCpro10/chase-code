@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	_ "io"
 	"log"
 	"net/http"
 	"os"
@@ -43,10 +44,11 @@ type LLMMessage struct {
 	Content string
 }
 
-// LLMResult 是 Complete 返回的结构化结果，目前只包含一条 assistant 消息，
-// 以后可以扩展 usage、tool 调用信息等元数据。
+// LLMResult 是 Complete 返回的结构化结果，
+// 目前包含一条 assistant 消息以及可选的工具调用列表（来自 OpenAI tool_calls）。
 type LLMResult struct {
-	Message LLMMessage
+	Message   LLMMessage
+	ToolCalls []ToolCall
 }
 
 // LLMClient 抽象一个“模型客户端”，参考 codex 的 ModelClient：
@@ -108,9 +110,6 @@ func NewLLMConfigFromEnv() (*LLMConfig, error) {
 
 	case ProviderKimi:
 		// Kimi（Moonshot）API：兼容 OpenAI 的 /v1/chat/completions
-		// 文档示例：
-		//   api_key="MOONSHOT_API_KEY"
-		//   base_url="https://api.moonshot.cn/v1"
 		apiKey := os.Getenv("CHASE_CODE_KIMI_API_KEY")
 		if apiKey == "" {
 			// 兼容直接使用 MOONSHOT_API_KEY 的场景
@@ -181,9 +180,11 @@ type OpenAIClient struct {
 }
 
 type openAIChatRequest struct {
-	Model    string              `json:"model"`
-	Messages []openAIChatMessage `json:"messages"`
-	Stream   bool                `json:"stream"`
+	Model      string               `json:"model"`
+	Messages   []openAIChatMessage  `json:"messages"`
+	Stream     bool                 `json:"stream"`
+	Tools      []openAIFunctionTool `json:"tools,omitempty"`
+	ToolChoice json.RawMessage      `json:"tool_choice,omitempty"`
 }
 
 type openAIChatMessage struct {
@@ -191,32 +192,98 @@ type openAIChatMessage struct {
 	Content string `json:"content"`
 }
 
+// openAIFunctionTool / openAIFunction 定义了 OpenAI tools/function calling 所需的最小结构。
+// 目前只在 buildChatRequest 中使用，用于在 Prompt.Tools 非空时构造 tools 数组，
+// 行为与现有实现保持兼容：如果没有提供 ToolSpec 或缺少参数模式，则不会附带 tools 字段。
+type openAIFunctionTool struct {
+	Type     string            `json:"type"` // 始终为 "function"
+	Function openAIFunctionDef `json:"function"`
+}
+
+type openAIFunctionDef struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+// openAIChatResponse 对应 Chat Completions 的响应结构。
+// 为了后续支持 OpenAI tools/function calling，这里预留了 tool_calls 字段，
+// 当前实现仍然只使用 message.content 字段驱动现有的工具 JSON 协议。
 type openAIChatResponse struct {
 	Choices []struct {
 		Message struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
+			Role      string `json:"role"`
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls,omitempty"`
 		} `json:"message"`
 	} `json:"choices"`
 }
 
-func (c *OpenAIClient) Complete(ctx context.Context, p Prompt) (*LLMResult, error) {
-	url := fmt.Sprintf("%s/chat/completions", c.cfg.BaseURL)
-
+// buildChatRequest 仿照 codex 的做法，将 Prompt 映射为 Chat Completions 请求体：
+//   - 基于 Prompt.Messages 构造 messages 数组；
+//   - 如有需要，后续可以在这里将 Prompt.Tools 转换为 OpenAI tools/function 调用。
+//
+// 当前实现只在 Prompt.Tools 中存在带参数模式的 ToolSpec 时才填充 tools 字段，
+// 对现有行为完全兼容（默认不会启用 function calling）。
+func (c *OpenAIClient) buildChatRequest(p Prompt) openAIChatRequest {
 	msgs := make([]openAIChatMessage, 0, len(p.Messages))
 	for _, m := range p.Messages {
 		msgs = append(msgs, openAIChatMessage{Role: string(m.Role), Content: m.Content})
 	}
 
-	reqBody := openAIChatRequest{Model: c.cfg.Model, Messages: msgs, Stream: false}
+	req := openAIChatRequest{Model: c.cfg.Model, Messages: msgs, Stream: false}
+
+	// 预留：当 Prompt.Tools 提供了参数 schema 时，将其转成 OpenAI function tools。
+	if len(p.Tools) > 0 {
+		tools := make([]openAIFunctionTool, 0, len(p.Tools))
+		for _, t := range p.Tools {
+			// 只有在 parameters 非空时才生成 function tool，避免发送不完整的 schema。
+			if len(t.Parameters) == 0 || string(t.Parameters) == "null" {
+				continue
+			}
+			tools = append(tools, openAIFunctionTool{
+				Type: "function",
+				Function: openAIFunctionDef{
+					Name:        t.Name,
+					Description: t.Description,
+					Parameters:  t.Parameters,
+				},
+			})
+		}
+		if len(tools) > 0 {
+			req.Tools = tools
+			// 先固定为 auto，后续可以按需支持指定某个函数或 parallel 调用。
+			req.ToolChoice = json.RawMessage(`"auto"`)
+		}
+	}
+
+	return req
+}
+
+func (c *OpenAIClient) Complete(ctx context.Context, p Prompt) (*LLMResult, error) {
+	url := fmt.Sprintf("%s/chat/completions", c.cfg.BaseURL)
+
+	reqBody := c.buildChatRequest(p)
 
 	data, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, err
 	}
 
-	// 记录请求日志（不包含 API Key）
-	log.Printf("[llm] request provider=%s model=%s url=%s body_bytes=%d", c.cfg.Provider, c.cfg.Model, url, len(data))
+	// 记录完整请求体（不包含 API Key），使用缩进后的 JSON 便于阅读
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, data, "", "  "); err != nil {
+		// 回退到原始 body，避免因为格式化失败丢日志
+		pretty.Write(data)
+	}
+	log.Printf("[llm] request provider=%s model=%s url=%s body_bytes=%d body=\n%s", c.cfg.Provider, c.cfg.Model, url, len(data), pretty.String())
 
 	start := time.Now()
 
@@ -256,11 +323,27 @@ func (c *OpenAIClient) Complete(ctx context.Context, p Prompt) (*LLMResult, erro
 	msg := out.Choices[0].Message
 	log.Printf("[llm] success provider=%s model=%s elapsed=%s", c.cfg.Provider, c.cfg.Model, time.Since(start))
 
+	var toolCalls []ToolCall
+	// 默认启用 function calling：如果模型返回了 tool_calls，则优先将其解析为内部 ToolCall 列表，
+	// 由上层 Session 使用；否则仍然只依赖 message.content 中的自定义 JSON 协议作为回退路径。
+	if len(msg.ToolCalls) > 0 {
+		for _, tc := range msg.ToolCalls {
+			if tc.Function.Name == "" {
+				continue
+			}
+			toolCalls = append(toolCalls, ToolCall{
+				ToolName:  tc.Function.Name,
+				Arguments: json.RawMessage(tc.Function.Arguments),
+			})
+		}
+	}
+
 	return &LLMResult{
 		Message: LLMMessage{
 			Role:    Role(msg.Role),
 			Content: msg.Content,
 		},
+		ToolCalls: toolCalls,
 	}, nil
 }
 

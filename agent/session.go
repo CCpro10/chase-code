@@ -87,7 +87,9 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 		}
 		log.Printf("[agent] step=%d calling LLM (history_len=%d)", step, len(msgs))
 
-		prompt := server.Prompt{Messages: msgs}
+		// function calling 默认开启：始终将 ToolSpec 列表传给 LLM，
+		// 由 llm.go 根据 ToolSpec.Parameters 构造 OpenAI tools 数组。
+		prompt := server.Prompt{Messages: msgs, Tools: s.Router.Specs()}
 
 		// 为本次 LLM 调用单独设置超时，避免影响后续工具执行/审批流程。
 		llmCtx, cancelLLM := context.WithTimeout(baseCtx, 60*time.Second)
@@ -98,11 +100,23 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 			return msgs, err
 		}
 		reply := res.Message.Content
-		log.Printf("[agent] step=%d LLM reply_len=%d", step, len(reply))
+		log.Printf("[agent] step=%d LLM reply_len=%d tool_calls=%d", step, len(reply), len(res.ToolCalls))
 
-		// 2) 解析为工具调用 JSON；若失败则视为最终回答
-		calls, err := servertools.ParseToolCallsJSON(reply)
-		if err != nil || len(calls) == 0 {
+		var calls []server.ToolCall
+		if len(res.ToolCalls) > 0 {
+			// 1) 优先使用 OpenAI tool_calls 结果
+			calls = res.ToolCalls
+		} else {
+			// 2) 回退到原有的文本 JSON 工具协议
+			var parseErr error
+			calls, parseErr = servertools.ParseToolCallsJSON(reply)
+			if parseErr != nil {
+				log.Printf("[agent] step=%d parse tool_calls from text failed: %v", step, parseErr)
+			}
+		}
+
+		// 如果既没有 function call，也没有有效的文本工具 JSON，则视为最终回答
+		if len(calls) == 0 {
 			if s.Sink != nil {
 				s.Sink.SendEvent(server.Event{
 					Kind:    server.EventAgentTextDone,
@@ -116,7 +130,7 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 			return msgs, nil
 		}
 
-		// 有工具调用时，先发送“规划”事件，方便 CLI 展示原始 JSON
+		// 有工具调用时，先发送“规划”事件，方便 CLI 展示原始 JSON 或 function 调用情况
 		if s.Sink != nil {
 			s.Sink.SendEvent(server.Event{
 				Kind:    server.EventToolPlanned,
@@ -125,7 +139,7 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 				Message: reply,
 			})
 		}
-		log.Printf("[agent] step=%d parsed %d tool_calls", step, len(calls))
+		log.Printf("[agent] step=%d resolved %d tool_calls", step, len(calls))
 
 		// 3) 依次执行所有工具调用，将输出写回历史，供下一轮 LLM 使用
 		// 工具执行和审批流程使用 baseCtx，以避免受 LLM 超时影响。
