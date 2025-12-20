@@ -33,8 +33,13 @@ type replAgentSession struct {
 var replAgent *replAgentSession
 
 var (
+	replAgentMu sync.Mutex
+
 	pendingApprovalMu sync.Mutex
 	pendingApprovalID string
+
+	agentRunningMu sync.Mutex
+	agentRunning   bool
 )
 
 // setPendingApprovalID 在收到补丁审批请求事件时记录当前待审批的请求ID。
@@ -53,7 +58,31 @@ func consumePendingApprovalID() string {
 	return id
 }
 
+func isAgentRunning() bool {
+	agentRunningMu.Lock()
+	defer agentRunningMu.Unlock()
+	return agentRunning
+}
+
+func tryStartAgentTurn() bool {
+	agentRunningMu.Lock()
+	defer agentRunningMu.Unlock()
+	if agentRunning {
+		return false
+	}
+	agentRunning = true
+	return true
+}
+
+func finishAgentTurn() {
+	agentRunningMu.Lock()
+	defer agentRunningMu.Unlock()
+	agentRunning = false
+}
+
 func getOrInitReplAgent() (*replAgentSession, error) {
+	replAgentMu.Lock()
+	defer replAgentMu.Unlock()
 	if replAgent != nil {
 		return replAgent, nil
 	}
@@ -144,7 +173,16 @@ func runRepl() error {
 				}
 				continue
 			}
+			if isAgentRunning() {
+				fmt.Fprintln(os.Stderr, "当前没有待审批请求")
+				continue
+			}
 			// 如果没有待审批请求，则按普通输入处理
+		}
+
+		if isAgentRunning() && !isAllowedWhileAgentRunning(line) {
+			fmt.Fprintln(os.Stderr, "当前有任务在执行，请先处理审批或等待完成")
+			continue
 		}
 
 		if strings.HasPrefix(line, "/") {
@@ -162,9 +200,29 @@ func runRepl() error {
 		}
 
 		// 默认当成 agent 指令执行（而不是 shell 命令）。
-		if err := runAgentTurn(line); err != nil {
+		if err := startAgentTurn(line); err != nil {
 			fmt.Fprintf(os.Stderr, "%sagent 执行失败: %v%s\n", colorYellow, err, colorReset)
 		}
+	}
+}
+
+func isAllowedWhileAgentRunning(line string) bool {
+	if strings.EqualFold(line, "y") || strings.EqualFold(line, "s") {
+		return true
+	}
+	if !strings.HasPrefix(line, ":") {
+		return false
+	}
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return true
+	}
+	cmd := strings.TrimPrefix(fields[0], ":")
+	switch cmd {
+	case "approve", "reject", "y", "s", "q", "quit", "exit", "help":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -192,7 +250,7 @@ func handleReplCommand(line string) (err error) {
 		if rest == "" {
 			return fmt.Errorf("用法: :agent <任务描述>")
 		}
-		return runAgentTurn(rest)
+		return startAgentTurn(rest)
 	case "approve":
 		if len(fields) != 2 {
 			return fmt.Errorf("用法: :approve <请求ID>")
@@ -203,6 +261,12 @@ func handleReplCommand(line string) (err error) {
 			return fmt.Errorf("用法: :reject <请求ID>")
 		}
 		return sendApproval(fields[1], false)
+	case "y", "s":
+		if id := consumePendingApprovalID(); id != "" {
+			approved := cmd == "y"
+			return sendApproval(id, approved)
+		}
+		return fmt.Errorf("当前没有待审批请求")
 	default:
 		return fmt.Errorf("未知 repl 命令: %s", cmd)
 	}
@@ -211,16 +275,26 @@ func handleReplCommand(line string) (err error) {
 
 const maxSteps = 10
 
+func startAgentTurn(userInput string) error {
+	if !tryStartAgentTurn() {
+		return fmt.Errorf("当前有任务在执行，请先处理审批或等待完成")
+	}
+	go func() {
+		defer finishAgentTurn()
+		if err := runAgentTurn(userInput); err != nil {
+			fmt.Fprintf(os.Stderr, "%sagent 执行失败: %v%s\n", colorYellow, err, colorReset)
+		}
+	}()
+	return nil
+}
+
 func runAgentTurn(userInput string) error {
 	sess, err := getOrInitReplAgent()
 	if err != nil {
 		return err
 	}
 
-	baseCtx := context.Background()
-	ctx, cancel := context.WithTimeout(baseCtx, 60*time.Second)
-	defer cancel()
-
+	ctx := context.Background()
 	newHistory, err := sess.session.RunTurn(ctx, userInput, sess.messages)
 	if err != nil {
 		return err

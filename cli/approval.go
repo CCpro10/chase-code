@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"chase-code/agent"
 )
@@ -16,6 +17,8 @@ func sendApproval(reqID string, approved bool) error {
 	}
 
 	ch := sess.session.ApprovalsChan()
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
 	select {
 	case ch <- agent.ApprovalDecision{RequestID: reqID, Approved: approved}:
 		if approved {
@@ -24,7 +27,7 @@ func sendApproval(reqID string, approved bool) error {
 			fmt.Fprintf(os.Stderr, "已拒绝补丁请求: %s\n", reqID)
 		}
 		return nil
-	default:
+	case <-timer.C:
 		return fmt.Errorf("审批通道暂不可用，请稍后重试")
 	}
 }

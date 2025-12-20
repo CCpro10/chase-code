@@ -1,0 +1,5 @@
+2025/12/20 11:21:16.756828 [agent] new turn input="你有什么工具" history_len=1
+2025/12/20 11:21:16.758815 [agent] step=0 calling LLM (history_len=2)
+2025/12/20 11:21:16.759258 [llm] request provider=kimi model=kimi-k2-turbo-preview url=https://api.moonshot.cn/v1/chat/completions body_bytes=6483
+2025/12/20 11:21:24.737396 [llm] success provider=kimi model=kimi-k2-turbo-preview elapsed=7.978146083s
+2025/12/20 11:21:24.737718 [agent] step=0 LLM reply_len=583

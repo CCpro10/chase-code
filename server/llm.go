@@ -1,13 +1,15 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -48,8 +50,8 @@ type LLMResult struct {
 }
 
 // LLMClient 抽象一个“模型客户端”，参考 codex 的 ModelClient：
-//  - Complete 返回一个结构化的 LLMResult，而不是裸字符串，方便扩展；
-//  - Stream 保持现有的事件流接口，用于以后支持真正的流式输出。
+//   - Complete 返回一个结构化的 LLMResult，而不是裸字符串，方便扩展；
+//   - Stream 保持现有的事件流接口，用于以后支持真正的流式输出。
 type LLMClient interface {
 	Complete(ctx context.Context, p Prompt) (*LLMResult, error)
 	Stream(ctx context.Context, p Prompt) *LLMStream
@@ -139,6 +141,28 @@ func NewLLMConfigFromEnv() (*LLMConfig, error) {
 }
 
 func NewLLMClient(cfg *LLMConfig) (LLMClient, error) {
+	// 初始化日志输出（只做一次，重复调用 log.SetOutput 影响有限）
+	path := os.Getenv("CHASE_CODE_LOG_FILE")
+	if path == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			path = filepath.Join(cwd, ".chase-code", "logs", "chase-code.log")
+		}
+	}
+	if path != "" {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			log.Printf("[llm] 创建日志目录失败: %v", err)
+		} else {
+			f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+			if err == nil {
+				log.SetOutput(f)
+				log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+			} else {
+				// 打不开日志文件时，退回标准错误输出
+				log.Printf("[llm] 打开日志文件失败: %v", err)
+			}
+		}
+	}
+
 	switch cfg.Provider {
 	case ProviderOpenAI, ProviderKimi:
 		// Kimi API 兼容 OpenAI Chat Completions，因此可以复用同一个 HTTP 客户端实现，
@@ -191,8 +215,14 @@ func (c *OpenAIClient) Complete(ctx context.Context, p Prompt) (*LLMResult, erro
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytesReader(data))
+	// 记录请求日志（不包含 API Key）
+	log.Printf("[llm] request provider=%s model=%s url=%s body_bytes=%d", c.cfg.Provider, c.cfg.Model, url, len(data))
+
+	start := time.Now()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
+		log.Printf("[llm] new request error: %v", err)
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
@@ -200,6 +230,7 @@ func (c *OpenAIClient) Complete(ctx context.Context, p Prompt) (*LLMResult, erro
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		log.Printf("[llm] http error: %v (elapsed=%s)", err, time.Since(start))
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -208,18 +239,23 @@ func (c *OpenAIClient) Complete(ctx context.Context, p Prompt) (*LLMResult, erro
 		var bodyBytes [4096]byte
 		n, _ := resp.Body.Read(bodyBytes[:])
 		msg := fmt.Sprintf("OpenAI API 返回非 2xx 状态码: %d, body: %s", resp.StatusCode, string(bodyBytes[:n]))
+		log.Printf("[llm] non-2xx status=%d body_snippet=%q (elapsed=%s)", resp.StatusCode, string(bodyBytes[:n]), time.Since(start))
 		return nil, errors.New(msg)
 	}
 
 	var out openAIChatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		log.Printf("[llm] decode response error: %v (elapsed=%s)", err, time.Since(start))
 		return nil, err
 	}
 	if len(out.Choices) == 0 {
+		log.Printf("[llm] empty choices (elapsed=%s)", time.Since(start))
 		return nil, errors.New("OpenAI 响应中没有 choices")
 	}
 
 	msg := out.Choices[0].Message
+	log.Printf("[llm] success provider=%s model=%s elapsed=%s", c.cfg.Provider, c.cfg.Model, time.Since(start))
+
 	return &LLMResult{
 		Message: LLMMessage{
 			Role:    Role(msg.Role),
@@ -246,23 +282,4 @@ func (c *OpenAIClient) Stream(ctx context.Context, p Prompt) *LLMStream {
 	}()
 
 	return stream
-}
-
-// bytesReader 是对 bytes.NewReader 的一个轻量封装。
-func bytesReader(b []byte) *bytesReaderWrapper {
-	return &bytesReaderWrapper{b: b}
-}
-
-type bytesReaderWrapper struct {
-	b []byte
-	o int
-}
-
-func (r *bytesReaderWrapper) Read(p []byte) (int, error) {
-	if r.o >= len(r.b) {
-		return 0, io.EOF
-	}
-	n := copy(p, r.b[r.o:])
-	r.o += n
-	return n, nil
 }

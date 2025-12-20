@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	"chase-code/server"
@@ -42,7 +43,7 @@ func NewSession(client server.LLMClient, router *servertools.ToolRouter, sink se
 		Sink:      sink,
 		MaxSteps:  maxSteps,
 		Config:    cfg,
-		approvals: make(chan ApprovalDecision),
+		approvals: make(chan ApprovalDecision, 1),
 	}
 }
 
@@ -68,6 +69,7 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 	}
 
 	msgs := append(history, server.Message{Role: server.RoleUser, Content: userInput})
+	log.Printf("[agent] new turn input=%q history_len=%d", userInput, len(history))
 
 	if s.Sink != nil {
 		s.Sink.SendEvent(server.Event{Kind: server.EventTurnStarted, Time: time.Now()})
@@ -83,6 +85,7 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 		if s.Sink != nil {
 			s.Sink.SendEvent(server.Event{Kind: server.EventAgentThinking, Time: time.Now(), Step: step})
 		}
+		log.Printf("[agent] step=%d calling LLM (history_len=%d)", step, len(msgs))
 
 		prompt := server.Prompt{Messages: msgs}
 
@@ -91,9 +94,11 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 		res, err := s.Client.Complete(llmCtx, prompt)
 		cancelLLM()
 		if err != nil {
+			log.Printf("[agent] step=%d LLM error: %v", step, err)
 			return msgs, err
 		}
 		reply := res.Message.Content
+		log.Printf("[agent] step=%d LLM reply_len=%d", step, len(reply))
 
 		// 2) 解析为工具调用 JSON；若失败则视为最终回答
 		calls, err := servertools.ParseToolCallsJSON(reply)
@@ -120,10 +125,12 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 				Message: reply,
 			})
 		}
+		log.Printf("[agent] step=%d parsed %d tool_calls", step, len(calls))
 
 		// 3) 依次执行所有工具调用，将输出写回历史，供下一轮 LLM 使用
 		// 工具执行和审批流程使用 baseCtx，以避免受 LLM 超时影响。
 		for _, c := range calls {
+			log.Printf("[agent] step=%d executing tool=%s", step, c.ToolName)
 			var item server.ResponseItem
 			var execErr error
 			toolCtx := baseCtx
@@ -142,6 +149,7 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 						Message:  "工具执行失败: " + execErr.Error(),
 					})
 				}
+				log.Printf("[agent] step=%d tool=%s error=%v", step, c.ToolName, execErr)
 				// 同时把失败信息写回对话历史，避免模型误以为工具执行成功。
 				msgs = append(msgs, server.Message{
 					Role:    server.RoleAssistant,
@@ -165,6 +173,7 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 					ToolName: c.ToolName,
 				})
 			}
+			log.Printf("[agent] step=%d tool=%s done output_len=%d", step, c.ToolName, len(item.ToolOutput))
 
 			// 把工具结果写回对话历史，便于后续 LLM 使用
 			msgs = append(msgs,
