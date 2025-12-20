@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 )
 
@@ -68,12 +67,14 @@ type ResponseItem struct {
 	ToolName      string          `json:"tool_name,omitempty"`
 	ToolArguments json.RawMessage `json:"tool_arguments,omitempty"`
 	ToolOutput    string          `json:"tool_output,omitempty"`
+	CallID        string          `json:"call_id,omitempty"`
 }
 
 // ToolCall 描述一条来自 LLM 的工具调用请求，对应约定的 JSON 协议。
 type ToolCall struct {
 	ToolName  string          `json:"tool_name"`
 	Arguments json.RawMessage `json:"arguments"`
+	CallID    string          `json:"call_id,omitempty"`
 }
 
 // ContextManager 管理一次会话的完整历史（消息 + 工具调用 + 工具结果）。
@@ -101,9 +102,7 @@ func (c *ContextManager) Record(items ...ResponseItem) {
 }
 
 // BuildPromptMessages 将内部的 ResponseItem 历史转换为模型最终看到的 Message 数组。
-// 在这里统一决定：
-//   - 工具结果以什么样的自然语言形式暴露给模型
-//   - 工具输出是否截断
+// 仅保留普通对话消息；工具结果通过 Prompt.Items 以 tool role 传递给模型。
 func (c *ContextManager) BuildPromptMessages() []Message {
 	if c == nil {
 		return nil
@@ -120,15 +119,8 @@ func (c *ContextManager) BuildPromptMessages() []Message {
 			})
 
 		case ResponseItemToolResult:
-			// 工具结果：以统一的自然语言包装 + 截断输出
-			if it.ToolName == "" && it.ToolOutput == "" {
-				continue
-			}
-			content := fmt.Sprintf("工具 %s 的输出:\n%s", it.ToolName, truncateToolOutput(it.ToolOutput))
-			msgs = append(msgs, Message{
-				Role:    RoleAssistant,
-				Content: content,
-			})
+			// 工具结果不再塞进 Messages，避免被误当成 assistant 文本。
+			continue
 
 		case ResponseItemToolCall:
 			// 是否把工具调用计划暴露给模型由你决定：
@@ -152,8 +144,8 @@ func (c *ContextManager) History() []ResponseItem {
 
 // 工具输出截断相关的简单常量，可按需调整。
 const (
-	toolPreviewMaxRunes   = 4096
-	toolPreviewMaxLines   = 80
+	toolPreviewMaxRunes   = 40960
+	toolPreviewMaxLines   = 800
 	toolPreviewTruncation = "...(工具输出已截断)"
 )
 

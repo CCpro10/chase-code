@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	_ "io"
+	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -139,12 +141,31 @@ func NewLLMConfigFromEnv() (*LLMConfig, error) {
 	}
 }
 
+// NewLLMClient 每次被调用时都会初始化一个新的 LLMClient 实例。
+//
+// 为了便于调试不同对话会话（Session）的行为，这里仿照 codex 的做法，
+// 为每次会话生成一个简单的 SessionID，并将日志输出到按 SessionID 区分的
+// 独立日志文件中：
+//   - SessionID 由当前日期(YYYYMMDD)、时间(HHMMSS)和 4 位随机数组成；
+//   - 日志文件路径形如：
+//     $CWD/.chase-code/logs/chase-code-<SessionID>.log
+//   - 如需覆盖默认路径，可通过环境变量 CHASE_CODE_LOG_FILE 指定完整文件名。
+//
+// 注意：这里仍然使用标准库 log 作为输出后端，log.SetOutput 是进程级别的，
+// chase-code 默认在单会话模式下运行，因此该行为是可以接受的。
 func NewLLMClient(cfg *LLMConfig) (LLMClient, error) {
-	// 初始化日志输出（只做一次，重复调用 log.SetOutput 影响有限）
+	// 初始化日志输出：优先使用显式指定的 CHASE_CODE_LOG_FILE，
+	// 否则在当前工作目录下按 SessionID 生成独立日志文件。
 	path := os.Getenv("CHASE_CODE_LOG_FILE")
 	if path == "" {
 		if cwd, err := os.Getwd(); err == nil {
-			path = filepath.Join(cwd, ".chase-code", "logs", "chase-code.log")
+			// 生成形如 20251220-153005-4821 的 SessionID
+			now := time.Now()
+			datePart := now.Format("20060102-150405")
+			// 使用纳秒时间作为随机源，避免全局 rand.Seed 带来的竞态
+			rnd := rand.New(rand.NewSource(now.UnixNano()))
+			randPart := rnd.Intn(10000)
+			path = filepath.Join(cwd, ".chase-code", "logs", fmt.Sprintf("chase-code-%s-%04d.log", datePart, randPart))
 		}
 	}
 	if path != "" {
@@ -155,6 +176,7 @@ func NewLLMClient(cfg *LLMConfig) (LLMClient, error) {
 			if err == nil {
 				log.SetOutput(f)
 				log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+				log.Printf("[llm] 使用日志文件: %s", path)
 			} else {
 				// 打不开日志文件时，退回标准错误输出
 				log.Printf("[llm] 打开日志文件失败: %v", err)
@@ -188,8 +210,22 @@ type openAIChatRequest struct {
 }
 
 type openAIChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string           `json:"role"`
+	Content    string           `json:"content,omitempty"`
+	Name       string           `json:"name,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
+	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
+}
+
+type openAIToolCall struct {
+	ID       string                 `json:"id"`
+	Type     string                 `json:"type"`
+	Function openAIToolCallFunction `json:"function"`
+}
+
+type openAIToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 // openAIFunctionTool / openAIFunction 定义了 OpenAI tools/function calling 所需的最小结构。
@@ -204,6 +240,59 @@ type openAIFunctionDef struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+// buildMessagesFromItems 将高层的 ResponseItem 历史转换为底层 OpenAI Chat 消息。
+// 这里会：
+//   - 将普通对话消息映射为 user/assistant 等角色；
+//   - 将工具输出映射为 role:"tool" 的消息，并在可能的情况下携带 tool_call_id。
+func buildMessagesFromItems(items []ResponseItem) []openAIChatMessage {
+	msgs := make([]openAIChatMessage, 0, len(items))
+	for _, it := range items {
+		switch it.Type {
+		case ResponseItemMessage:
+			msgs = append(msgs, openAIChatMessage{
+				Role:    string(it.Role),
+				Content: it.Text,
+			})
+
+		case ResponseItemToolResult:
+			// 将工具输出作为 role:"tool" 的消息发送给 OpenAI，
+			// 使其语义更接近 codex 对 FunctionCallOutput 的处理方式。
+			if it.ToolName == "" && it.ToolOutput == "" {
+				continue
+			}
+			msgs = append(msgs, openAIChatMessage{
+				Role:       "tool",
+				Name:       it.ToolName,
+				ToolCallID: it.CallID,
+				Content:    it.ToolOutput,
+			})
+
+		case ResponseItemToolCall:
+			if it.ToolName == "" {
+				continue
+			}
+			args := strings.TrimSpace(string(it.ToolArguments))
+			if args == "" {
+				args = "{}"
+			}
+			msgs = append(msgs, openAIChatMessage{
+				Role: "assistant",
+				ToolCalls: []openAIToolCall{
+					{
+						ID:   it.CallID,
+						Type: "function",
+						Function: openAIToolCallFunction{
+							Name:      it.ToolName,
+							Arguments: args,
+						},
+					},
+				},
+			})
+		}
+	}
+	return msgs
 }
 
 // openAIChatResponse 对应 Chat Completions 的响应结构。
@@ -227,15 +316,20 @@ type openAIChatResponse struct {
 }
 
 // buildChatRequest 仿照 codex 的做法，将 Prompt 映射为 Chat Completions 请求体：
-//   - 基于 Prompt.Messages 构造 messages 数组；
+//   - 优先基于 Prompt.Items 构造 messages（便于使用 tool role）；如 Items 为空则回退到 Prompt.Messages；
 //   - 如有需要，后续可以在这里将 Prompt.Tools 转换为 OpenAI tools/function 调用。
 //
 // 当前实现只在 Prompt.Tools 中存在带参数模式的 ToolSpec 时才填充 tools 字段，
 // 对现有行为完全兼容（默认不会启用 function calling）。
 func (c *OpenAIClient) buildChatRequest(p Prompt) openAIChatRequest {
-	msgs := make([]openAIChatMessage, 0, len(p.Messages))
-	for _, m := range p.Messages {
-		msgs = append(msgs, openAIChatMessage{Role: string(m.Role), Content: m.Content})
+	var msgs []openAIChatMessage
+	if len(p.Items) > 0 {
+		msgs = buildMessagesFromItems(p.Items)
+	} else {
+		msgs = make([]openAIChatMessage, 0, len(p.Messages))
+		for _, m := range p.Messages {
+			msgs = append(msgs, openAIChatMessage{Role: string(m.Role), Content: m.Content})
+		}
 	}
 
 	req := openAIChatRequest{Model: c.cfg.Model, Messages: msgs, Stream: false}
@@ -302,16 +396,22 @@ func (c *OpenAIClient) Complete(ctx context.Context, p Prompt) (*LLMResult, erro
 	}
 	defer resp.Body.Close()
 
+	// 读取完整响应体并打印出来，方便调试所有 2xx/非 2xx 情况。
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		log.Printf("[llm] read response error: %v (elapsed=%s)", readErr, time.Since(start))
+		return nil, readErr
+	}
+	log.Printf("[llm] raw response status=%d body_bytes=%d body=\n%s", resp.StatusCode, len(respBody), string(respBody))
+
 	if resp.StatusCode/100 != 2 {
-		var bodyBytes [4096]byte
-		n, _ := resp.Body.Read(bodyBytes[:])
-		msg := fmt.Sprintf("OpenAI API 返回非 2xx 状态码: %d, body: %s", resp.StatusCode, string(bodyBytes[:n]))
-		log.Printf("[llm] non-2xx status=%d body_snippet=%q (elapsed=%s)", resp.StatusCode, string(bodyBytes[:n]), time.Since(start))
+		msg := fmt.Sprintf("OpenAI API 返回非 2xx 状态码: %d, body: %s", resp.StatusCode, string(respBody))
+		log.Printf("[llm] non-2xx status=%d (elapsed=%s)", resp.StatusCode, time.Since(start))
 		return nil, errors.New(msg)
 	}
 
 	var out openAIChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.Unmarshal(respBody, &out); err != nil {
 		log.Printf("[llm] decode response error: %v (elapsed=%s)", err, time.Since(start))
 		return nil, err
 	}
@@ -334,6 +434,7 @@ func (c *OpenAIClient) Complete(ctx context.Context, p Prompt) (*LLMResult, erro
 			toolCalls = append(toolCalls, ToolCall{
 				ToolName:  tc.Function.Name,
 				Arguments: json.RawMessage(tc.Function.Arguments),
+				CallID:    tc.ID,
 			})
 		}
 	}

@@ -77,6 +77,7 @@ func (r *ToolRouter) Execute(ctx context.Context, call server.ToolCall) (server.
 				Type:       server.ResponseItemToolResult,
 				ToolName:   call.ToolName,
 				ToolOutput: out,
+				CallID:     call.CallID,
 			}, nil
 		}
 		return server.ResponseItem{}, fmt.Errorf("未知工具: %s", call.ToolName)
@@ -132,7 +133,7 @@ func (r *ToolRouter) execShell(_ context.Context, call server.ToolCall) (server.
 	}
 
 	summary := fmt.Sprintf("command=%q exit_code=%d duration=%s timed_out=%v", args.Command, res.ExitCode, res.Duration, res.TimedOut)
-	return server.ResponseItem{Type: server.ResponseItemToolResult, ToolName: "shell", ToolOutput: summary}, nil
+	return server.ResponseItem{Type: server.ResponseItemToolResult, ToolName: "shell", ToolOutput: summary, CallID: call.CallID}, nil
 }
 
 // ---------------- read_file ----------------
@@ -159,7 +160,7 @@ func (r *ToolRouter) execReadFile(call server.ToolCall) (server.ResponseItem, er
 		return server.ResponseItem{}, err
 	}
 
-	return server.ResponseItem{Type: server.ResponseItemToolResult, ToolName: "read_file", ToolOutput: string(data)}, nil
+	return server.ResponseItem{Type: server.ResponseItemToolResult, ToolName: "read_file", ToolOutput: string(data), CallID: call.CallID}, nil
 }
 
 // ---------------- edit/apply_patch ----------------
@@ -198,7 +199,7 @@ func (r *ToolRouter) execPatchCommon(toolName string, call server.ToolCall) (ser
 	}
 
 	msg := fmt.Sprintf("已更新文件: %s", abs)
-	return server.ResponseItem{Type: server.ResponseItemToolResult, ToolName: toolName, ToolOutput: msg}, nil
+	return server.ResponseItem{Type: server.ResponseItemToolResult, ToolName: toolName, ToolOutput: msg, CallID: call.CallID}, nil
 }
 
 // ---------------- list_dir ----------------
@@ -230,7 +231,7 @@ func (r *ToolRouter) execListDir(call server.ToolCall) (server.ResponseItem, err
 		fmt.Fprintln(&b, name)
 	}
 
-	return server.ResponseItem{Type: server.ResponseItemToolResult, ToolName: "list_dir", ToolOutput: b.String()}, nil
+	return server.ResponseItem{Type: server.ResponseItemToolResult, ToolName: "list_dir", ToolOutput: b.String(), CallID: call.CallID}, nil
 }
 
 // ---------------- grep_files ----------------
@@ -305,7 +306,7 @@ func (r *ToolRouter) execGrepFiles(call server.ToolCall) (server.ResponseItem, e
 		b.WriteString("未找到匹配项")
 	}
 
-	return server.ResponseItem{Type: server.ResponseItemToolResult, ToolName: "grep_files", ToolOutput: b.String()}, nil
+	return server.ResponseItem{Type: server.ResponseItemToolResult, ToolName: "grep_files", ToolOutput: b.String(), CallID: call.CallID}, nil
 }
 
 // runRipgrep 使用 rg(1) 在 root 下搜索 pattern，并限制返回的匹配行数。

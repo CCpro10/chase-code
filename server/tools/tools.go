@@ -152,13 +152,13 @@ func DefaultToolSpecs() []server.ToolSpec {
 		{
 			Kind:        server.ToolKindFunction,
 			Name:        "grep_files",
-			Description: "使用 ripgrep 在代码中查找匹配行。",
+			Description: "使用 ripgrep 在代码中查找匹配行。用于搜索代码、查询理解项目结构。",
 			Parameters:  toolParamsGrepFiles,
 		},
 		{
 			Kind:        server.ToolKindFunction,
 			Name:        "apply_patch",
-			Description: "对单个文件应用简单补丁（基于字符串替换）。",
+			Description: "对单个文件应用修改（基于字符串替换）。",
 			Parameters:  toolParamsApplyPatch,
 		},
 	}
@@ -185,14 +185,13 @@ func BuildToolSystemPrompt(tools []server.ToolSpec) string {
 	b.WriteString("在决定是否调用工具时，请先思考：\n")
 	b.WriteString("1. 当前还缺少什么信息？\n")
 	b.WriteString("2. 哪个工具最适合获取这些信息或修改代码？\n")
-	b.WriteString("3. 预期调用该工具后，下一步你打算做什么？\n\n")
 
 	b.WriteString("=== 工具选择建议 ===\n\n")
 	b.WriteString("- 想了解项目结构 → 优先使用 list_dir 或 grep_files。\n")
 	b.WriteString("- 想阅读/理解某个文件 → 使用 read_file。\n")
 	b.WriteString("- 想做小范围修改 → 使用 apply_patch，修改前尽量先 read_file 确认上下文。\n")
 	b.WriteString("- 想执行命令（如 go test / go build）→ 使用 shell，但要避免危险命令（删除系统文件、格式化磁盘等）。\n")
-	b.WriteString("- 如果多次调用同一个工具都得不到有用信息，应停止重复调用，转为向用户说明当前阻碍。\n\n")
+	b.WriteString("- 执行工具后、继续根据用户需求，选择其他工具、直到完成用户的任务。\n\n")
 
 	// 工具列表（给模型一个清晰的总览）
 	b.WriteString("=== 可用工具列表（名称 / 描述 / 参数 Schema） ===\n")

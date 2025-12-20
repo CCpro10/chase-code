@@ -109,6 +109,7 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 		prompt := server.Prompt{
 			Messages: cm.BuildPromptMessages(),
 			Tools:    s.Router.Specs(),
+			Items:    cm.History(),
 		}
 
 		log.Printf("[agent] step=%d calling LLM (history_items=%d, prompt_msgs=%d)", step, len(cm.History()), len(prompt.Messages))
@@ -126,6 +127,14 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 		reply := res.Message.Content
 		log.Printf("[agent] step=%d LLM reply_len=%d tool_calls=%d", step, len(reply), len(res.ToolCalls))
 		log.Printf("[agent] step=%d LLM reply preview:\n%s", step, previewLLMReplyForLog(reply))
+
+		if strings.TrimSpace(reply) != "" {
+			cm.Record(server.ResponseItem{
+				Type: server.ResponseItemMessage,
+				Role: server.RoleAssistant,
+				Text: reply,
+			})
+		}
 
 		var calls []server.ToolCall
 		if len(res.ToolCalls) > 0 {
@@ -152,14 +161,13 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 				s.Sink.SendEvent(server.Event{Kind: server.EventTurnFinished, Time: time.Now(), Step: step})
 			}
 
-			// 记录 assistant 最终回答到历史
-			cm.Record(server.ResponseItem{
-				Type: server.ResponseItemMessage,
-				Role: server.RoleAssistant,
-				Text: reply,
-			})
-
 			return itemsToMessages(cm.History()), nil
+		}
+
+		for i := range calls {
+			if strings.TrimSpace(calls[i].CallID) == "" {
+				calls[i].CallID = fmt.Sprintf("local-%d-%d", step, i)
+			}
 		}
 
 		// 有工具调用时，先发送“规划”事件，方便 CLI 展示原始 JSON 或 function 调用情况
@@ -183,6 +191,7 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 				Type:          server.ResponseItemToolCall,
 				ToolName:      c.ToolName,
 				ToolArguments: c.Arguments,
+				CallID:        c.CallID,
 			})
 
 			var item server.ResponseItem
@@ -211,6 +220,7 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 					Type:       server.ResponseItemToolResult,
 					ToolName:   c.ToolName,
 					ToolOutput: fmt.Sprintf("工具执行失败: %v", execErr),
+					CallID:     c.CallID,
 				})
 
 				continue
@@ -234,11 +244,12 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 			log.Printf("[agent] step=%d tool=%s done output_len=%d", step, c.ToolName, len(item.ToolOutput))
 
 			// 3.2 把工具结果以 ResponseItem 形式写回历史，
-			//      实际暴露给模型时由 ContextManager 统一包装 + 截断。
+			//      实际暴露给模型时由 ContextManager/llm.go 统一包装。
 			cm.Record(server.ResponseItem{
 				Type:       server.ResponseItemToolResult,
 				ToolName:   item.ToolName,
 				ToolOutput: item.ToolOutput,
+				CallID:     c.CallID,
 			})
 		}
 	}
