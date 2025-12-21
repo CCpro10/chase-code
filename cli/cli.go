@@ -69,6 +69,34 @@ func usage() {
 
 // runShell 解析 shell 子命令参数并调用 tools.RunExec。
 func runShell(args []string) error {
+	result, err := executeShellCommand(args)
+	if result == nil {
+		return err
+	}
+
+	if strings.TrimSpace(result.Output) != "" {
+		fmt.Fprint(os.Stdout, result.Output)
+		if !strings.HasSuffix(result.Output, "\n") {
+			fmt.Fprintln(os.Stdout)
+		}
+	}
+	if result.TimedOut {
+		fmt.Fprintf(os.Stderr, "命令超时 (耗时 %s)\n", result.Duration)
+	}
+	os.Exit(result.ExitCode)
+	return nil
+}
+
+// shellExecResult 描述一次 shell 命令执行结果。
+type shellExecResult struct {
+	Output   string
+	ExitCode int
+	Duration time.Duration
+	TimedOut bool
+}
+
+// executeShellCommand 执行 shell 子命令并返回结构化结果，供 REPL 复用。
+func executeShellCommand(args []string) (*shellExecResult, error) {
 	fs := flag.NewFlagSet("shell", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
@@ -94,32 +122,32 @@ func runShell(args []string) error {
 	}
 
 	if err := fs.Parse(flagArgs); err != nil {
-		return err
+		return nil, err
 	}
 
 	if len(cmdParts) == 0 {
 		cmdParts = fs.Args()
 	}
 	if len(cmdParts) == 0 {
-		return fmt.Errorf("缺少要执行的 shell 命令")
+		return nil, fmt.Errorf("缺少要执行的 shell 命令")
 	}
 	commandStr := strings.Join(cmdParts, " ")
 
 	policy, err := servertools.ParseSandboxPolicy(*policyStr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	shell := servertools.DetectUserShell()
 	if shell.Kind == servertools.ShellUnknown {
-		return fmt.Errorf("无法自动检测用户 shell，请显式指定命令，如: bash -lc '...'")
+		return nil, fmt.Errorf("无法自动检测用户 shell，请显式指定命令，如: bash -lc '...'")
 	}
 
 	shellArgs := shell.DeriveExecArgs(commandStr, *loginShell)
 
 	cwd, err := os.Getwd()
 	if err != nil {
-		return fmt.Errorf("获取当前工作目录失败: %w", err)
+		return nil, fmt.Errorf("获取当前工作目录失败: %w", err)
 	}
 
 	params := servertools.ExecParams{
@@ -130,22 +158,13 @@ func runShell(args []string) error {
 	}
 
 	result, err := servertools.RunExec(params, policy)
-	if err != nil {
-		return err
+	if result == nil {
+		return nil, err
 	}
-
-	if result != nil {
-		// 先输出命令的 stdout/stderr 内容。
-		if strings.TrimSpace(result.Output) != "" {
-			fmt.Fprint(os.Stdout, result.Output)
-			if !strings.HasSuffix(result.Output, "\n") {
-				fmt.Fprintln(os.Stdout)
-			}
-		}
-		if result.TimedOut {
-			fmt.Fprintf(os.Stderr, "命令超时 (耗时 %s)\n", result.Duration)
-		}
-		os.Exit(result.ExitCode)
-	}
-	return nil
+	return &shellExecResult{
+		Output:   result.Output,
+		ExitCode: result.ExitCode,
+		Duration: result.Duration,
+		TimedOut: result.TimedOut,
+	}, err
 }

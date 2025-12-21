@@ -2,129 +2,151 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
-	"chase-code/agent"
 	"chase-code/server"
 )
 
-// renderEvents 负责从事件通道中消费 server.Event，并以带颜色和缩进的形式
-// 渲染到终端上，模拟类似 codex-rs 的实时反馈体验。
-// approvals 通道用于在收到补丁审批请求时，将用户的审批决策写回给 agent.Session。
-func renderEvents(ch <-chan server.Event, approvals chan<- agent.ApprovalDecision) {
-	for ev := range ch {
-		renderEvent(ev)
-	}
-}
-
-// renderEvent 渲染单条事件。
-func renderEvent(ev server.Event) {
+// formatEvent 将事件转为可渲染的多行文本。
+func formatEvent(ev server.Event) []string {
 	switch ev.Kind {
 	case server.EventTurnStarted:
-		renderTurnStarted()
-	case server.EventAgentThinking:
-		renderAgentThinking(ev.Step)
-	case server.EventToolPlanned:
-		renderToolPlanned(ev.Step, ev.Message)
-	case server.EventToolStarted:
-		renderToolStarted(ev.ToolName)
-	case server.EventToolOutputDelta:
-		renderToolOutput(ev.ToolName, ev.Message)
-	case server.EventToolFinished:
-		renderToolFinished(ev.ToolName, ev.Message)
-	case server.EventPatchApprovalRequest:
-		renderPatchApprovalRequest(ev)
-	case server.EventAgentTextDone:
-		renderAgentText(ev.Message)
+		return formatTurnStarted()
 	case server.EventTurnFinished:
-		renderTurnFinished(ev.Step, ev.Message)
+		return formatTurnFinished(ev.Step, ev.Message)
+	case server.EventTurnError:
+		return formatTurnError(ev.Message)
+	case server.EventAgentThinking:
+		return formatAgentThinking(ev.Step)
+	case server.EventToolPlanned:
+		return formatToolPlanned(ev.Step, ev.Message)
+	case server.EventToolStarted:
+		return formatToolStarted(ev.ToolName)
+	case server.EventToolOutputDelta:
+		return formatToolOutput(ev.ToolName, ev.Message)
+	case server.EventToolFinished:
+		return formatToolFinished(ev.ToolName, ev.Message)
+	case server.EventPatchApprovalRequest:
+		return formatPatchApprovalRequest(ev)
+	case server.EventPatchApprovalResult:
+		return formatPatchApprovalResult(ev)
+	case server.EventAgentTextDone:
+		return formatAgentText(ev.Message)
+	default:
+		return nil
 	}
 }
 
-// renderTurnStarted 渲染 turn 开始提示。
-func renderTurnStarted() {
-	fmt.Fprintf(os.Stderr, "%s[turn]%s 开始\n", colorMagenta, colorReset)
+// formatTurnStarted 渲染 turn 开始提示。
+func formatTurnStarted() []string {
+	return []string{styleMagenta.Render("[turn] 开始")}
 }
 
-// renderAgentThinking 渲染思考阶段提示。
-func renderAgentThinking(step int) {
-	fmt.Fprintf(os.Stderr, "%s  [agent] 正在思考（step=%d）...%s\n", colorDim, step, colorReset)
+// formatAgentThinking 渲染思考阶段提示。
+func formatAgentThinking(step int) []string {
+	return []string{styleDim.Render(fmt.Sprintf("  [agent] 正在思考（step=%d）...", step))}
 }
 
-// renderToolPlanned 渲染工具规划事件。
-func renderToolPlanned(step int, message string) {
-	fmt.Fprintf(os.Stderr, "%s  [agent] 规划工具调用（step=%d）：%s\n", colorDim, step, colorReset)
-	if strings.TrimSpace(message) != "" {
-		fmt.Fprintf(os.Stderr, "%s%s%s\n", colorDim, indent(message, 4), colorReset)
-	}
-}
-
-// renderToolStarted 渲染工具开始执行事件。
-func renderToolStarted(toolName string) {
-	fmt.Fprintf(os.Stderr, "%s    [tool %s] 开始执行%s\n", colorYellow, toolName, colorReset)
-}
-
-// renderToolOutput 渲染工具输出事件。
-func renderToolOutput(toolName, message string) {
+// formatToolPlanned 渲染工具规划事件。
+func formatToolPlanned(step int, message string) []string {
+	lines := []string{styleDim.Render(fmt.Sprintf("  [agent] 规划工具调用（step=%d）：", step))}
 	if strings.TrimSpace(message) == "" {
-		return
+		return lines
 	}
-	fmt.Fprintf(os.Stderr, "%s      [tool %s 输出]%s\n", colorGreen, toolName, colorReset)
-	fmt.Println(indent(message, 8))
+	return append(lines, indentLines(message, 4)...)
 }
 
-// renderToolFinished 渲染工具结束事件。
-func renderToolFinished(toolName, message string) {
+// formatToolStarted 渲染工具开始执行事件。
+func formatToolStarted(toolName string) []string {
+	return []string{styleYellow.Render(fmt.Sprintf("    [tool %s] 开始执行", toolName))}
+}
+
+// formatToolOutput 渲染工具输出事件。
+func formatToolOutput(toolName, message string) []string {
+	if strings.TrimSpace(message) == "" {
+		return nil
+	}
+	lines := []string{styleDim.Render(fmt.Sprintf("      [tool %s 输出]", toolName))}
+	return append(lines, indentLines(message, 8)...)
+}
+
+// formatToolFinished 渲染工具结束事件。
+func formatToolFinished(toolName, message string) []string {
 	if message != "" {
-		fmt.Fprintf(os.Stderr, "%s    [tool %s 完成]%s %s\n", colorGreen, toolName, colorReset, message)
-		return
+		return []string{styleGreen.Render(fmt.Sprintf("    [tool %s 完成] %s", toolName, message))}
 	}
-	if toolName != "" {
-		fmt.Fprintf(os.Stderr, "%s    [tool %s 完成]%s\n", colorGreen, toolName, colorReset)
+	if toolName == "" {
+		return nil
 	}
+	return []string{styleGreen.Render(fmt.Sprintf("    [tool %s 完成]", toolName))}
 }
 
-// renderPatchApprovalRequest 渲染补丁审批请求事件。
-func renderPatchApprovalRequest(ev server.Event) {
-	fmt.Fprintf(os.Stderr, "%s[apply_patch 审批请求]%s id=%s\n", colorMagenta, colorReset, ev.RequestID)
+// formatPatchApprovalRequest 渲染补丁审批请求事件。
+func formatPatchApprovalRequest(ev server.Event) []string {
+	lines := []string{styleMagenta.Render(fmt.Sprintf("[apply_patch 审批请求] id=%s", ev.RequestID))}
 	if len(ev.Paths) > 0 {
-		fmt.Fprintln(os.Stderr, "  涉及文件:")
+		lines = append(lines, "  涉及文件:")
 		for _, p := range ev.Paths {
-			fmt.Fprintf(os.Stderr, "    - %s\n", p)
+			lines = append(lines, fmt.Sprintf("    - %s", p))
 		}
 	}
 	if strings.TrimSpace(ev.Message) != "" {
-		fmt.Fprintf(os.Stderr, "  原因: %s\n", ev.Message)
+		lines = append(lines, fmt.Sprintf("  原因: %s", ev.Message))
 	}
-	fmt.Fprintf(os.Stderr, "%s  直接输入 y 批准，s 跳过；或使用 :approve %s / :reject %s。%s\n",
-		colorDim, ev.RequestID, ev.RequestID, colorReset)
-	setPendingApprovalID(ev.RequestID)
+	lines = append(lines, styleDim.Render(fmt.Sprintf("  直接输入 y 批准，s 跳过；或使用 :approve %s / :reject %s。", ev.RequestID, ev.RequestID)))
+	return lines
 }
 
-// renderAgentText 渲染最终回答内容。
-func renderAgentText(message string) {
-	fmt.Fprintf(os.Stderr, "%s[agent]%s 最终回答：\n", colorCyan, colorReset)
-	fmt.Println(message)
+// formatPatchApprovalResult 渲染补丁审批结果事件。
+func formatPatchApprovalResult(ev server.Event) []string {
+	if strings.TrimSpace(ev.RequestID) == "" && strings.TrimSpace(ev.Message) == "" {
+		return nil
+	}
+	return []string{styleDim.Render(fmt.Sprintf("[apply_patch] %s id=%s", ev.Message, ev.RequestID))}
 }
 
-// renderTurnFinished 渲染 turn 结束提示。
-func renderTurnFinished(step int, message string) {
+// formatAgentText 渲染最终回答内容。
+func formatAgentText(message string) []string {
+	lines := []string{styleCyan.Render("[agent] 最终回答：")}
+	if strings.TrimSpace(message) == "" {
+		return lines
+	}
+	return append(lines, splitLines(message)...)
+}
+
+// formatTurnFinished 渲染 turn 结束提示。
+func formatTurnFinished(step int, message string) []string {
 	if message != "" {
-		fmt.Fprintf(os.Stderr, "%s[turn]%s 结束（step=%d）：%s\n", colorMagenta, colorReset, step, message)
-		return
+		return []string{styleMagenta.Render(fmt.Sprintf("[turn] 结束（step=%d）：%s", step, message))}
 	}
-	fmt.Fprintf(os.Stderr, "%s[turn]%s 结束（step=%d）\n", colorMagenta, colorReset, step)
+	return []string{styleMagenta.Render(fmt.Sprintf("[turn] 结束（step=%d）", step))}
 }
 
-func indent(s string, spaces int) string {
+// formatTurnError 渲染 turn 错误提示。
+func formatTurnError(message string) []string {
+	if strings.TrimSpace(message) == "" {
+		return nil
+	}
+	return []string{styleError.Render(message)}
+}
+
+// indentLines 将文本按行缩进。
+func indentLines(s string, spaces int) []string {
 	pad := strings.Repeat(" ", spaces)
-	lines := strings.Split(s, "\n")
-	for i, l := range lines {
-		if strings.TrimSpace(l) == "" {
+	lines := splitLines(s)
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		lines[i] = pad + l
+		lines[i] = pad + line
 	}
-	return strings.Join(lines, "\n")
+	return lines
+}
+
+// splitLines 安全拆分文本行，保留原始空行。
+func splitLines(s string) []string {
+	if s == "" {
+		return []string{""}
+	}
+	return strings.Split(s, "\n")
 }

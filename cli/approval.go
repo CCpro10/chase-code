@@ -2,18 +2,16 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"time"
 
 	"chase-code/agent"
 )
 
-// sendApproval 将用户在 repl 中输入的 :approve/:reject 命令转换为审批结果，
-// 写入当前 agent Session 的审批通道。
-func sendApproval(reqID string, approved bool) error {
+// sendApproval 将审批结果写入当前 agent Session 的审批通道，并返回提示信息。
+func sendApproval(reqID string, approved bool) (string, error) {
 	sess, err := getOrInitReplAgent()
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	ch := sess.session.ApprovalsChan()
@@ -22,12 +20,10 @@ func sendApproval(reqID string, approved bool) error {
 	select {
 	case ch <- agent.ApprovalDecision{RequestID: reqID, Approved: approved}:
 		if approved {
-			fmt.Fprintf(os.Stderr, "已批准补丁请求: %s\n", reqID)
-		} else {
-			fmt.Fprintf(os.Stderr, "已拒绝补丁请求: %s\n", reqID)
+			return fmt.Sprintf("已批准补丁请求: %s", reqID), nil
 		}
-		return nil
+		return fmt.Sprintf("已拒绝补丁请求: %s", reqID), nil
 	case <-timer.C:
-		return fmt.Errorf("审批通道暂不可用，请稍后重试")
+		return "", fmt.Errorf("审批通道暂不可用，请稍后重试")
 	}
 }

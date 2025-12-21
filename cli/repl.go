@@ -1,27 +1,18 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"log"
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"chase-code/agent"
 	"chase-code/config"
 	"chase-code/server"
 	servertools "chase-code/server/tools"
-)
-
-const (
-	colorReset   = "\033[0m"
-	colorDim     = "\033[2m"
-	colorCyan    = "\033[36m"
-	colorYellow  = "\033[33m"
-	colorGreen   = "\033[32m"
-	colorMagenta = "\033[35m"
 )
 
 type replAgentSession struct {
@@ -34,28 +25,9 @@ var replAgent *replAgentSession
 var (
 	replAgentMu sync.Mutex
 
-	pendingApprovalMu sync.Mutex
-	pendingApprovalID string
-
 	agentRunningMu sync.Mutex
 	agentRunning   bool
 )
-
-// setPendingApprovalID 在收到补丁审批请求事件时记录当前待审批的请求ID。
-func setPendingApprovalID(id string) {
-	pendingApprovalMu.Lock()
-	defer pendingApprovalMu.Unlock()
-	pendingApprovalID = id
-}
-
-// consumePendingApprovalID 在用户通过快捷键 y/s 做出决策时，取出并清空当前待审批请求ID。
-func consumePendingApprovalID() string {
-	pendingApprovalMu.Lock()
-	defer pendingApprovalMu.Unlock()
-	id := pendingApprovalID
-	pendingApprovalID = ""
-	return id
-}
 
 func isAgentRunning() bool {
 	agentRunningMu.Lock()
@@ -82,20 +54,44 @@ func finishAgentTurn() {
 func getOrInitReplAgent() (*replAgentSession, error) {
 	replAgentMu.Lock()
 	defer replAgentMu.Unlock()
-	if replAgent != nil {
+	if replAgent != nil && replAgent.session != nil {
 		return replAgent, nil
 	}
 
-	session, err := initReplAgentSession()
+	var events chan server.Event
+	if replAgent != nil {
+		events = replAgent.events
+	}
+	session, err := initReplAgentSession(events)
 	if err != nil {
 		return nil, err
 	}
-	replAgent = session
+	if replAgent == nil {
+		replAgent = session
+	} else {
+		replAgent.session = session.session
+		replAgent.events = session.events
+	}
 	return replAgent, nil
 }
 
+// getReplEvents 获取 REPL 的事件通道，必要时会创建占位通道。
+func getReplEvents() chan server.Event {
+	replAgentMu.Lock()
+	defer replAgentMu.Unlock()
+	if replAgent != nil && replAgent.events != nil {
+		return replAgent.events
+	}
+	events := make(chan server.Event, 128)
+	if replAgent == nil {
+		replAgent = &replAgentSession{}
+	}
+	replAgent.events = events
+	return events
+}
+
 // initReplAgentSession 初始化 REPL 使用的 agent 会话。
-func initReplAgentSession() (*replAgentSession, error) {
+func initReplAgentSession(events chan server.Event) (*replAgentSession, error) {
 	client, err := initLLMClient()
 	if err != nil {
 		return nil, err
@@ -104,10 +100,11 @@ func initReplAgentSession() (*replAgentSession, error) {
 	_, router := initToolRouter()
 	systemPrompt := servertools.BuildToolSystemPrompt(router.Specs())
 
-	events := make(chan server.Event, 128)
+	if events == nil {
+		events = make(chan server.Event, 128)
+	}
 	as := agent.NewSession(client, router, server.ChanEventSink{Ch: events}, maxSteps)
 	as.ResetHistoryWithSystemPrompt(systemPrompt)
-	go renderEvents(events, as.ApprovalsChan())
 
 	return &replAgentSession{
 		session: as,
@@ -154,94 +151,8 @@ func initToolRouter() ([]server.ToolSpec, *servertools.ToolRouter) {
 
 func runRepl() error {
 	ensureTerminalEraseKey()
-	printReplBanner()
-
-	scanner := bufio.NewScanner(os.Stdin)
-	for {
-		line, ok := readReplLine(scanner)
-		if !ok {
-			return nil
-		}
-		if line == "" {
-			continue
-		}
-
-		handled, err := tryHandleApprovalShortcut(line)
-		if handled {
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "审批失败: %v\n", err)
-			}
-			continue
-		}
-
-		if isAgentRunning() && !isAllowedWhileAgentRunning(line) {
-			fmt.Fprintln(os.Stderr, "当前有任务在执行，请先处理审批或等待完成")
-			continue
-		}
-
-		if err := dispatchReplLine(line); err != nil {
-			handleReplDispatchError(line, err)
-		}
-	}
-}
-
-// printReplBanner 输出启动提示信息。
-func printReplBanner() {
-	cwd, _ := os.Getwd()
-	fmt.Fprintf(os.Stderr, "chase-code repl（agent 优先），当前工作目录: %s\n", cwd)
-	fmt.Fprintln(os.Stderr, "直接输入问题或指令时，将通过 LLM+工具以 agent 方式执行；输入 :help 查看可用命令，:q 退出。")
-}
-
-// readReplLine 读取一行输入，返回是否读取成功。
-func readReplLine(scanner *bufio.Scanner) (string, bool) {
-	fmt.Fprintf(os.Stderr, "%schase> %s", colorCyan, colorReset)
-	if !scanner.Scan() {
-		fmt.Fprintln(os.Stderr)
-		return "", false
-	}
-	return strings.TrimSpace(scanner.Text()), true
-}
-
-// tryHandleApprovalShortcut 处理 y/s 快捷审批输入。
-func tryHandleApprovalShortcut(line string) (bool, error) {
-	if !isApprovalShortcut(line) {
-		return false, nil
-	}
-
-	if id := consumePendingApprovalID(); id != "" {
-		approved := strings.EqualFold(line, "y")
-		return true, sendApproval(id, approved)
-	}
-	if isAgentRunning() {
-		fmt.Fprintln(os.Stderr, "当前没有待审批请求")
-		return true, nil
-	}
-	return false, nil
-}
-
-// isApprovalShortcut 判断输入是否为 y/s 快捷审批。
-func isApprovalShortcut(line string) bool {
-	return strings.EqualFold(line, "y") || strings.EqualFold(line, "s")
-}
-
-// dispatchReplLine 根据输入前缀分发命令。
-func dispatchReplLine(line string) error {
-	if strings.HasPrefix(line, "/") {
-		return handleSlashCommand(line)
-	}
-	if strings.HasPrefix(line, ":") {
-		return handleReplCommand(line)
-	}
-	return startAgentTurn(line)
-}
-
-// handleReplDispatchError 根据命令类型输出不同的错误提示。
-func handleReplDispatchError(line string, err error) {
-	if strings.HasPrefix(line, "/") || strings.HasPrefix(line, ":") {
-		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
-		return
-	}
-	fmt.Fprintf(os.Stderr, "%sagent 执行失败: %v%s\n", colorYellow, err, colorReset)
+	events := getReplEvents()
+	return runReplTUI(events)
 }
 
 func isAllowedWhileAgentRunning(line string) bool {
@@ -264,32 +175,85 @@ func isAllowedWhileAgentRunning(line string) bool {
 	}
 }
 
-func handleReplCommand(line string) (err error) {
+type replDispatchResult struct {
+	lines []string
+	quit  bool
+}
+
+// dispatchReplInput 根据输入内容分发命令并返回渲染所需的输出。
+func dispatchReplInput(line string, pendingApprovalID string) (replDispatchResult, error) {
+	if strings.TrimSpace(line) == "" {
+		return replDispatchResult{}, nil
+	}
+
+	if handled, result, err := handleApprovalShortcut(line, pendingApprovalID); handled {
+		return result, err
+	}
+
+	if isAgentRunning() && !isAllowedWhileAgentRunning(line) {
+		return replDispatchResult{}, fmt.Errorf("当前有任务在执行，请先处理审批或等待完成")
+	}
+
+	if strings.HasPrefix(line, "/") {
+		lines, err := handleSlashCommand(line)
+		return replDispatchResult{lines: lines}, err
+	}
+	if strings.HasPrefix(line, ":") {
+		return handleReplCommand(line, pendingApprovalID)
+	}
+	return replDispatchResult{}, startAgentTurn(line)
+}
+
+// handleApprovalShortcut 处理 y/s 快捷审批输入。
+func handleApprovalShortcut(line string, pendingApprovalID string) (bool, replDispatchResult, error) {
+	if !isApprovalShortcut(line) {
+		return false, replDispatchResult{}, nil
+	}
+	if pendingApprovalID == "" {
+		if isAgentRunning() {
+			return true, replDispatchResult{lines: []string{"当前没有待审批请求"}}, nil
+		}
+		return false, replDispatchResult{}, nil
+	}
+	approved := strings.EqualFold(line, "y")
+	msg, err := sendApproval(pendingApprovalID, approved)
+	return true, replDispatchResult{lines: []string{msg}}, err
+}
+
+// isApprovalShortcut 判断输入是否为 y/s 快捷审批。
+func isApprovalShortcut(line string) bool {
+	return strings.EqualFold(line, "y") || strings.EqualFold(line, "s")
+}
+
+// handleReplCommand 解析 : 开头的命令并生成输出。
+func handleReplCommand(line string, pendingApprovalID string) (replDispatchResult, error) {
 	cmd := parseReplCommand(line)
 	if cmd.name == "" {
-		return nil
+		return replDispatchResult{}, nil
 	}
 
 	switch cmd.name {
 	case "q", "quit", "exit":
-		os.Exit(0)
+		return replDispatchResult{quit: true}, nil
 	case "help":
-		printReplHelp()
-		return nil
+		return replDispatchResult{lines: replHelpLines()}, nil
 	case "shell":
-		return handleShellCommand(cmd.args)
+		lines, err := handleShellCommand(cmd.args)
+		return replDispatchResult{lines: lines}, err
 	case "agent":
-		return handleAgentCommand(line)
+		return replDispatchResult{}, handleAgentCommand(line)
 	case "approve":
-		return handleApprovalCommand(cmd.args, true)
+		lines, err := handleApprovalCommand(cmd.args, true)
+		return replDispatchResult{lines: lines}, err
 	case "reject":
-		return handleApprovalCommand(cmd.args, false)
+		lines, err := handleApprovalCommand(cmd.args, false)
+		return replDispatchResult{lines: lines}, err
 	case "y", "s":
-		return handleApprovalShortcutCommand(cmd.name)
+		lines, err := handleApprovalShortcutCommand(cmd.name, pendingApprovalID)
+		return replDispatchResult{lines: lines}, err
 	default:
-		return fmt.Errorf("未知 repl 命令: %s", cmd.name)
+		return replDispatchResult{}, fmt.Errorf("未知 repl 命令: %s", cmd.name)
 	}
-	return nil
 }
 
 type replCommand struct {
@@ -310,11 +274,15 @@ func parseReplCommand(line string) replCommand {
 }
 
 // handleShellCommand 处理 :shell 命令。
-func handleShellCommand(args []string) error {
+func handleShellCommand(args []string) ([]string, error) {
 	if len(args) == 0 {
-		return fmt.Errorf("用法: :shell <命令>")
+		return nil, fmt.Errorf("用法: :shell <命令>")
 	}
-	return runShell([]string{"--", strings.Join(args, " ")})
+	result, err := executeShellCommand([]string{"--", strings.Join(args, " ")})
+	if result == nil {
+		return nil, err
+	}
+	return formatShellResult(result), err
 }
 
 // handleAgentCommand 处理 :agent 命令。
@@ -327,52 +295,80 @@ func handleAgentCommand(line string) error {
 }
 
 // handleApprovalCommand 处理 :approve/:reject 命令。
-func handleApprovalCommand(args []string, approved bool) error {
+func handleApprovalCommand(args []string, approved bool) ([]string, error) {
 	if len(args) != 1 {
 		if approved {
-			return fmt.Errorf("用法: :approve <请求ID>")
+			return nil, fmt.Errorf("用法: :approve <请求ID>")
 		}
-		return fmt.Errorf("用法: :reject <请求ID>")
+		return nil, fmt.Errorf("用法: :reject <请求ID>")
 	}
-	return sendApproval(args[0], approved)
+	msg, err := sendApproval(args[0], approved)
+	if err != nil {
+		return nil, err
+	}
+	return []string{msg}, nil
 }
 
 // handleApprovalShortcutCommand 处理 :y/:s 命令。
-func handleApprovalShortcutCommand(cmd string) error {
-	if id := consumePendingApprovalID(); id != "" {
-		approved := cmd == "y"
-		return sendApproval(id, approved)
+func handleApprovalShortcutCommand(cmd string, pendingApprovalID string) ([]string, error) {
+	if pendingApprovalID == "" {
+		return nil, fmt.Errorf("当前没有待审批请求")
 	}
-	return fmt.Errorf("当前没有待审批请求")
+	approved := cmd == "y"
+	msg, err := sendApproval(pendingApprovalID, approved)
+	if err != nil {
+		return nil, err
+	}
+	return []string{msg}, nil
 }
 
 const maxSteps = 40
 
+// startAgentTurn 异步启动一次 agent turn。
 func startAgentTurn(userInput string) error {
 	if !tryStartAgentTurn() {
 		return fmt.Errorf("当前有任务在执行，请先处理审批或等待完成")
 	}
+	sess, err := getOrInitReplAgent()
+	if err != nil {
+		finishAgentTurn()
+		return err
+	}
 	go func() {
 		defer finishAgentTurn()
-		if err := runAgentTurn(userInput); err != nil {
-			fmt.Fprintf(os.Stderr, "%sagent 执行失败: %v%s\n", colorYellow, err, colorReset)
+		if err := runAgentTurn(context.Background(), sess, userInput); err != nil {
+			emitAgentTurnError(sess, err)
 		}
 	}()
 	return nil
 }
 
-func runAgentTurn(userInput string) error {
-	sess, err := getOrInitReplAgent()
-	if err != nil {
-		return err
+// runAgentTurn 执行一次同步的 agent turn。
+func runAgentTurn(ctx context.Context, sess *replAgentSession, userInput string) error {
+	if sess == nil || sess.session == nil {
+		return fmt.Errorf("agent 会话未初始化")
 	}
-
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	return sess.session.RunTurn(ctx, userInput)
 }
 
-func printReplHelp() {
-	fmt.Fprintln(os.Stderr, `可用命令:
+// emitAgentTurnError 将 agent 执行失败信息写入事件流。
+func emitAgentTurnError(sess *replAgentSession, err error) {
+	if sess == nil || sess.session == nil || err == nil {
+		return
+	}
+	sess.session.Sink.SendEvent(server.Event{
+		Kind:    server.EventTurnError,
+		Time:    time.Now(),
+		Message: fmt.Sprintf("agent 执行失败: %v", err),
+	})
+}
+
+// replHelpLines 返回 REPL 帮助信息。
+func replHelpLines() []string {
+	return []string{`可用命令:
   :help                显示帮助
   :q / :quit / :exit   退出 repl
   :shell <cmd>         通过用户默认 shell 执行命令
@@ -381,5 +377,5 @@ func printReplHelp() {
   :reject <id>         拒绝指定补丁请求
 
 默认行为:
-  直接输入不以冒号开头的内容时，等价于 :agent <输入行>。`)
+  直接输入不以冒号开头的内容时，等价于 :agent <输入行>。`}
 }

@@ -9,10 +9,10 @@ import (
 
 // handleSlashCommand 处理以 "/" 开头的命令，例如 /approvals。
 // 这些命令主要用于运行时调整会话配置等高阶操作。
-func handleSlashCommand(line string) error {
+func handleSlashCommand(line string) ([]string, error) {
 	fields := strings.Fields(line)
 	if len(fields) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	cmd := strings.TrimPrefix(fields[0], "/")
@@ -20,7 +20,7 @@ func handleSlashCommand(line string) error {
 	case "approvals":
 		return handleApprovalsCommand(fields[1:])
 	default:
-		return fmt.Errorf("未知 / 命令: %s", cmd)
+		return nil, fmt.Errorf("未知 / 命令: %s", cmd)
 	}
 }
 
@@ -29,17 +29,18 @@ func handleSlashCommand(line string) error {
 //   - /approvals auto      设置为自动模式；
 //   - /approvals ask       设置为总是人工审批；
 //   - /approvals approve   设置为自动批准需要审批的补丁。
-func handleApprovalsCommand(args []string) error {
+func handleApprovalsCommand(args []string) ([]string, error) {
 	sess, err := getOrInitReplAgent()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	current := sess.session.Config.ToolApproval.ApplyPatch
 	if len(args) == 0 {
-		fmt.Printf("当前 apply_patch 审批模式: %s\n", current)
-		fmt.Println("可选值: auto | ask | approve")
-		return nil
+		return []string{
+			fmt.Sprintf("当前 apply_patch 审批模式: %s", current),
+			"可选值: auto | ask | approve",
+		}, nil
 	}
 
 	var mode agent.ApprovalMode
@@ -51,10 +52,9 @@ func handleApprovalsCommand(args []string) error {
 	case "approve", "always_approve":
 		mode = agent.ApprovalModeAlwaysApprove
 	default:
-		return fmt.Errorf("未知审批模式: %s（可选: auto|ask|approve）", args[0])
+		return nil, fmt.Errorf("未知审批模式: %s（可选: auto|ask|approve）", args[0])
 	}
 
 	sess.session.Config.ToolApproval.ApplyPatch = mode
-	fmt.Printf("已将 apply_patch 审批模式切换为: %s\n", mode)
-	return nil
+	return []string{fmt.Sprintf("已将 apply_patch 审批模式切换为: %s", mode)}, nil
 }

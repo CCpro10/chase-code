@@ -10,6 +10,8 @@ const (
 	// 一次用户 turn 的生命周期
 	EventTurnStarted  EventKind = "turn_started"
 	EventTurnFinished EventKind = "turn_finished"
+	// turn 执行过程中出现错误
+	EventTurnError EventKind = "turn_error"
 
 	// LLM / Agent 相关
 	EventAgentThinking  EventKind = "agent_thinking"   // 准备调用 LLM
