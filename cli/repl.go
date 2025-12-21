@@ -25,9 +25,8 @@ const (
 )
 
 type replAgentSession struct {
-	session  *agent.Session
-	messages []server.Message
-	events   chan server.Event
+	session *agent.Session
+	events  chan server.Event
 }
 
 var replAgent *replAgentSession
@@ -121,14 +120,14 @@ func getOrInitReplAgent() (*replAgentSession, error) {
 	// 创建事件通道和 Agent Session
 	events := make(chan server.Event, 128)
 	as := agent.NewSession(client, router, server.ChanEventSink{Ch: events}, maxSteps)
+	as.ResetHistoryWithSystemPrompt(systemPrompt)
 
 	// 启动事件渲染 goroutine
 	go renderEvents(events, as.ApprovalsChan())
 
 	replAgent = &replAgentSession{
-		session:  as,
-		messages: []server.Message{{Role: server.RoleSystem, Content: systemPrompt}},
-		events:   events,
+		session: as,
+		events:  events,
 	}
 	return replAgent, nil
 }
@@ -281,12 +280,7 @@ func runAgentTurn(userInput string) error {
 	}
 
 	ctx := context.Background()
-	newHistory, err := sess.session.RunTurn(ctx, userInput, sess.messages)
-	if err != nil {
-		return err
-	}
-	sess.messages = newHistory
-	return nil
+	return sess.session.RunTurn(ctx, userInput)
 }
 
 func printReplHelp() {

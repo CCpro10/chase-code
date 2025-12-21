@@ -24,6 +24,9 @@ type Session struct {
 
 	// approvals 用于接收来自 CLI 的补丁审批结果。
 	approvals chan ApprovalDecision
+
+	// history 记录会话内所有对话与工具轨迹，生命周期跟随 Session。
+	history []server.ResponseItem
 }
 
 // ApprovalDecision 表示一次补丁审批请求的结果。
@@ -53,15 +56,30 @@ func (s *Session) ApprovalsChan() chan<- ApprovalDecision {
 	return s.approvals
 }
 
+// ResetHistoryWithSystemPrompt 重置会话历史，并注入系统提示词（如为空则仅清空历史）。
+func (s *Session) ResetHistoryWithSystemPrompt(systemPrompt string) {
+	if s == nil {
+		return
+	}
+
+	s.history = nil
+	if strings.TrimSpace(systemPrompt) == "" {
+		return
+	}
+	s.history = append(s.history, server.ResponseItem{
+		Type: server.ResponseItemMessage,
+		Role: server.RoleSystem,
+		Text: systemPrompt,
+	})
+}
+
 // RunTurn 执行一轮用户指令：
-//   - 先将 userInput 追加到历史中（以 ResponseItem 形式管理）；
+//   - 使用 Session 内部历史，并将 userInput 追加进去；
 //   - 在最多 MaxSteps 步内，反复调用 LLM 和工具；
 //   - 当 LLM 不再返回工具调用 JSON 时，将其视为最终回答并结束。
-//
-// 返回更新后的对话历史（仍然是 []server.Message，以兼容现有调用方）。
-func (s *Session) RunTurn(ctx context.Context, userInput string, history []server.Message) ([]server.Message, error) {
+func (s *Session) RunTurn(ctx context.Context, userInput string) error {
 	if s == nil || s.Client == nil || s.Router == nil {
-		return history, nil
+		return nil
 	}
 
 	maxSteps := s.MaxSteps
@@ -69,26 +87,16 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 		maxSteps = 10
 	}
 
-	// 1) 将旧的 []Message 历史转换为 []ResponseItem
-	historyItems := make([]server.ResponseItem, 0, len(history)+1)
-	for _, m := range history {
-		historyItems = append(historyItems, server.ResponseItem{
-			Type: server.ResponseItemMessage,
-			Role: m.Role,
-			Text: m.Content,
-		})
-	}
+	cm := server.NewContextManager(s.history)
 
-	// 2) 追加本轮用户输入
-	historyItems = append(historyItems, server.ResponseItem{
+	// 追加本轮用户输入
+	cm.Record(server.ResponseItem{
 		Type: server.ResponseItemMessage,
 		Role: server.RoleUser,
 		Text: userInput,
 	})
 
-	cm := server.NewContextManager(historyItems)
-
-	log.Printf("[agent] new turn input=%q history_len=%d", userInput, len(history))
+	log.Printf("[agent] new turn input=%q history_len=%d", userInput, len(s.history))
 
 	s.Sink.SendEvent(server.Event{Kind: server.EventTurnStarted, Time: time.Now()})
 
@@ -116,8 +124,7 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 		cancelLLM()
 		if err != nil {
 			log.Printf("[agent] step=%d LLM error: %v", step, err)
-			// 失败时直接返回当前折叠后的历史
-			return itemsToMessages(cm.History()), err
+			return err
 		}
 
 		reply := res.Message.Content
@@ -155,7 +162,8 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 			})
 			s.Sink.SendEvent(server.Event{Kind: server.EventTurnFinished, Time: time.Now(), Step: step})
 
-			return itemsToMessages(cm.History()), nil
+			s.history = cm.History()
+			return nil
 		}
 
 		for i := range calls {
@@ -250,23 +258,8 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 		Message: "达到最大步数，终止",
 	})
 
-	return itemsToMessages(cm.History()), nil
-}
-
-// itemsToMessages 将 ResponseItem 历史折叠回旧的 []server.Message 形式，
-// 只保留 Type=message 的条目，确保对外行为兼容。
-func itemsToMessages(items []server.ResponseItem) []server.Message {
-	msgs := make([]server.Message, 0, len(items))
-	for _, it := range items {
-		if it.Type != server.ResponseItemMessage {
-			continue
-		}
-		msgs = append(msgs, server.Message{
-			Role:    it.Role,
-			Content: it.Text,
-		})
-	}
-	return msgs
+	s.history = cm.History()
+	return nil
 }
 
 const (
