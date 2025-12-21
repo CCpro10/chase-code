@@ -1,6 +1,6 @@
 package agent
 
-import "os"
+import "chase-code/config"
 
 // ApprovalMode 控制工具相关操作（目前主要是 apply_patch）的审批行为。
 // 借鉴 codex-rs 中 SessionConfiguration 的思想，这里提供三种模式：
@@ -29,7 +29,7 @@ type SessionConfig struct {
 // 当前支持：
 //   - CHASE_CODE_APPLY_PATCH_APPROVAL: auto|always_ask|always_approve
 func DefaultSessionConfigFromEnv() SessionConfig {
-	modeStr := os.Getenv("CHASE_CODE_APPLY_PATCH_APPROVAL")
+	modeStr := config.Get().ApplyPatchApproval
 	mode := ApprovalModeAuto
 	switch ApprovalMode(modeStr) {
 	case ApprovalModeAlwaysAsk, ApprovalModeAlwaysApprove:

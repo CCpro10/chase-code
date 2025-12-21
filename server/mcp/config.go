@@ -4,42 +4,45 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	gosdkclient "github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
+	"github.com/mark3labs/mcp-go/mcp"
 
 	"chase-code/server"
-	gosdkclient "github.com/mark3labs/mcp-go/client"
 )
 
-// MCPServerConfig 描述一个通过 MCP 连接的外部工具服务器。
-// 当前仿照 codex 的 "mcp-server" 能力，只关注 stdio 进程方式。
-//
-// 示例 JSON 配置（多个 server）:
+// MCPRemoteServerConfig 描述一个通过 HTTP/SSE 方式连接的 MCP 服务。
+// 示例 JSON 配置（多个 mcpServers）:
 //
 //	{
-//	  "servers": [
-//	    {
-//	      "name": "filesystem",
-//	      "command": "mcp-filesystem",
-//	      "args": ["--root", "/Users/me/project"],
-//	      "env": ["FOO=bar"],
-//	      "cwd": "/Users/me/project"
+//	  "mcpServers": {
+//	    "test": {
+//	      "autoApprove": [],
+//	      "disabled": false,
+//	      "timeout": 60,
+//	      "type": "streamableHttp",
+//	      "url": "https://example.com/streamable"
 //	    }
-//	  ]
+//	  }
 //	}
-//
-// chase-code 通过 go-sdk 创建 stdio MCP client 并与这些 server 通信。
-type MCPServerConfig struct {
-	Name    string   `json:"name"`           // 在 LLM 工具名中使用的前缀/标识
-	Command string   `json:"command"`        // 可执行文件名，如 "mcp-filesystem" 或 "codex-mcp-server"
-	Args    []string `json:"args,omitempty"` // 额外参数
-	Env     []string `json:"env,omitempty"`  // 传递给子进程的环境变量，默认继承 os.Environ
-	Cwd     string   `json:"cwd,omitempty"`  // 子进程工作目录，不填则使用当前 cwd
+type MCPRemoteServerConfig struct {
+	AutoApprove []string `json:"autoApprove,omitempty"`
+	Disabled    bool     `json:"disabled,omitempty"`
+	Timeout     int      `json:"timeout,omitempty"` // 秒
+	Type        string   `json:"type"`
+	URL         string   `json:"url"`
 }
 
 // MCPConfig 是顶层 MCP 配置。
 type MCPConfig struct {
-	Servers []MCPServerConfig `json:"servers"`
+	MCPServers map[string]MCPRemoteServerConfig `json:"mcpServers,omitempty"`
 }
 
 // LoadMCPConfig 从 JSON 文件加载 MCPConfig。
@@ -69,33 +72,112 @@ func LoadMCPConfig(path string) (*MCPConfig, error) {
 	return &cfg, nil
 }
 
+type startableMCPClient interface {
+	Start(ctx context.Context) error
+}
+
 // NewMCPClientsFromConfig 基于 MCPConfig 创建一组 MCPClient 适配器。
-// 每个 server 对应一个 go-sdk stdio client，并包装成 GoSDKMCPClient。
+// 支持 stdio / sse / streamable_http 三种连接方式。
 func NewMCPClientsFromConfig(cfg *MCPConfig) ([]MCPClient, error) {
-	if cfg == nil || len(cfg.Servers) == 0 {
+	if cfg == nil || len(cfg.MCPServers) == 0 {
 		return nil, nil
 	}
 
-	clients := make([]MCPClient, 0, len(cfg.Servers))
-	for _, s := range cfg.Servers {
-		if s.Command == "" {
-			return nil, fmt.Errorf("MCP server %q 缺少 command 字段", s.Name)
+	clients := make([]MCPClient, 0, len(cfg.MCPServers))
+	if len(cfg.MCPServers) > 0 {
+		keys := make([]string, 0, len(cfg.MCPServers))
+		for k := range cfg.MCPServers {
+			keys = append(keys, k)
 		}
+		sort.Strings(keys)
+		for _, name := range keys {
+			s := cfg.MCPServers[name]
+			if s.Disabled {
+				continue
+			}
+			if strings.TrimSpace(s.URL) == "" {
+				return nil, fmt.Errorf("MCP server %q 缺少 url 字段", name)
+			}
+			mcpType := normalizeMCPType(s.Type)
+			if mcpType == "" {
+				return nil, fmt.Errorf("MCP server %q type 不支持: %q", name, s.Type)
+			}
+			timeout := resolveTimeout(s.Timeout)
 
-		// 合并环境变量: 先继承当前进程，再追加配置中 env。
-		env := os.Environ()
-		if len(s.Env) > 0 {
-			env = append(env, s.Env...)
+			var client *gosdkclient.Client
+			switch mcpType {
+			case "sse":
+				httpClient := &http.Client{Timeout: timeout}
+				var err error
+				client, err = gosdkclient.NewSSEMCPClient(s.URL, gosdkclient.WithHTTPClient(httpClient))
+				if err != nil {
+					return nil, fmt.Errorf("创建 MCP SSE client %q 失败: %w", name, err)
+				}
+			case "streamable_http":
+				var err error
+				client, err = gosdkclient.NewStreamableHttpClient(s.URL, transport.WithHTTPTimeout(timeout))
+				if err != nil {
+					return nil, fmt.Errorf("创建 MCP HTTP client %q 失败: %w", name, err)
+				}
+			default:
+				return nil, fmt.Errorf("MCP server %q type 不支持: %q", name, s.Type)
+			}
+
+			if err := initMCPClient(context.Background(), name, client, timeout); err != nil {
+				return nil, err
+			}
+			clients = append(clients, NewGoSDKMCPClient(client))
 		}
-
-		client, err := gosdkclient.NewStdioMCPClient(s.Command, env, s.Args...)
-		if err != nil {
-			return nil, fmt.Errorf("启动 MCP server %q 失败: %w", s.Name, err)
-		}
-
-		clients = append(clients, NewGoSDKMCPClient(client))
 	}
 	return clients, nil
+}
+
+func normalizeMCPType(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "sse":
+		return "sse"
+	case "streamablehttp", "streamable_http", "streamable-http":
+		return "streamable_http"
+	default:
+		return ""
+	}
+}
+
+func resolveTimeout(v int) time.Duration {
+	if v <= 0 {
+		return 60 * time.Second
+	}
+	return time.Duration(v) * time.Second
+}
+
+func initMCPClient(ctx context.Context, name string, client *gosdkclient.Client, timeout time.Duration) error {
+	if client == nil {
+		return fmt.Errorf("MCP client %q 为空", name)
+	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	if startable, ok := any(client).(startableMCPClient); ok {
+		if err := startable.Start(ctx); err != nil {
+			return fmt.Errorf("启动 MCP client %q 失败: %w", name, err)
+		}
+	}
+	initReq := mcp.InitializeRequest{
+		Params: mcp.InitializeParams{
+			ProtocolVersion: mcp.LATEST_PROTOCOL_VERSION,
+			ClientInfo: mcp.Implementation{
+				Name:    "chase-code",
+				Version: "0.0.1",
+			},
+			Capabilities: mcp.ClientCapabilities{},
+		},
+	}
+	if _, err := client.Initialize(ctx, initReq); err != nil {
+		return fmt.Errorf("初始化 MCP client %q 失败: %w", name, err)
+	}
+	return nil
 }
 
 // MergeMCPTools 使用多个 MCPClient 拉取工具列表，并合并为 MCPTool/ToolSpec。

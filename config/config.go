@@ -1,0 +1,89 @@
+package config
+
+import (
+	"fmt"
+	"os"
+	"strings"
+	"sync"
+)
+
+// Config 汇总所有通过环境变量控制的运行配置。
+// 统一集中读取，方便日志输出与调试。
+type Config struct {
+	MCPConfigPath      string
+	LogFile            string
+	LLMProvider        string
+	OpenAIAPIKey       string
+	OpenAIModel        string
+	OpenAIBaseURL      string
+	KimiAPIKey         string
+	KimiModel          string
+	KimiBaseURL        string
+	MoonshotAPIKey     string
+	ApplyPatchApproval string
+}
+
+var (
+	once sync.Once
+	cfg  Config
+)
+
+// Get 返回全局配置（延迟加载）。
+func Get() *Config {
+	once.Do(func() {
+		cfg = loadFromEnv()
+	})
+	return &cfg
+}
+
+func loadFromEnv() Config {
+	return Config{
+		MCPConfigPath:      strings.TrimSpace(os.Getenv("CHASE_CODE_MCP_CONFIG")),
+		LogFile:            strings.TrimSpace(os.Getenv("CHASE_CODE_LOG_FILE")),
+		LLMProvider:        strings.TrimSpace(os.Getenv("CHASE_CODE_LLM_PROVIDER")),
+		OpenAIAPIKey:       strings.TrimSpace(os.Getenv("CHASE_CODE_OPENAI_API_KEY")),
+		OpenAIModel:        strings.TrimSpace(os.Getenv("CHASE_CODE_OPENAI_MODEL")),
+		OpenAIBaseURL:      strings.TrimSpace(os.Getenv("CHASE_CODE_OPENAI_BASE_URL")),
+		KimiAPIKey:         strings.TrimSpace(os.Getenv("CHASE_CODE_KIMI_API_KEY")),
+		KimiModel:          strings.TrimSpace(os.Getenv("CHASE_CODE_KIMI_MODEL")),
+		KimiBaseURL:        strings.TrimSpace(os.Getenv("CHASE_CODE_KIMI_BASE_URL")),
+		MoonshotAPIKey:     strings.TrimSpace(os.Getenv("MOONSHOT_API_KEY")),
+		ApplyPatchApproval: strings.TrimSpace(os.Getenv("CHASE_CODE_APPLY_PATCH_APPROVAL")),
+	}
+}
+
+// Summary 返回可安全打印的配置摘要（会脱敏 key）。
+func (c Config) Summary() string {
+	return fmt.Sprintf(
+		"provider=%s mcp_config=%s log_file=%s openai_model=%s openai_base_url=%s openai_api_key=%s kimi_model=%s kimi_base_url=%s kimi_api_key=%s moonshot_api_key=%s apply_patch_approval=%s",
+		emptyAsDefault(c.LLMProvider, "(default)"),
+		emptyAsDefault(c.MCPConfigPath, "(empty)"),
+		emptyAsDefault(c.LogFile, "(empty)"),
+		emptyAsDefault(c.OpenAIModel, "(default)"),
+		emptyAsDefault(c.OpenAIBaseURL, "(default)"),
+		maskSecret(c.OpenAIAPIKey),
+		emptyAsDefault(c.KimiModel, "(default)"),
+		emptyAsDefault(c.KimiBaseURL, "(default)"),
+		maskSecret(c.KimiAPIKey),
+		maskSecret(c.MoonshotAPIKey),
+		emptyAsDefault(c.ApplyPatchApproval, "(default)"),
+	)
+}
+
+func emptyAsDefault(v, def string) string {
+	if strings.TrimSpace(v) == "" {
+		return def
+	}
+	return v
+}
+
+func maskSecret(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "(empty)"
+	}
+	if len(v) <= 6 {
+		return "***"
+	}
+	return v[:2] + "***" + v[len(v)-2:]
+}

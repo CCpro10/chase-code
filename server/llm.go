@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"chase-code/config"
 )
 
 // LLMEventKind / LLMEvent / LLMStream 参考 codex 的流式接口抽象，当前实现
@@ -82,7 +84,8 @@ type LLMConfig struct {
 //   - openai (默认): 使用 CHASE_CODE_OPENAI_* 环境变量
 //   - kimi:          使用 CHASE_CODE_KIMI_* 环境变量，Kimi API 兼容 OpenAI Chat Completions
 func NewLLMConfigFromEnv() (*LLMConfig, error) {
-	provider := os.Getenv("CHASE_CODE_LLM_PROVIDER")
+	env := config.Get()
+	provider := env.LLMProvider
 	if provider == "" {
 		provider = string(ProviderOpenAI)
 	}
@@ -90,15 +93,15 @@ func NewLLMConfigFromEnv() (*LLMConfig, error) {
 	p := LLMProvider(provider)
 	switch p {
 	case ProviderOpenAI:
-		apiKey := os.Getenv("CHASE_CODE_OPENAI_API_KEY")
+		apiKey := env.OpenAIAPIKey
 		if apiKey == "" {
 			return nil, errors.New("缺少环境变量 CHASE_CODE_OPENAI_API_KEY")
 		}
-		model := os.Getenv("CHASE_CODE_OPENAI_MODEL")
+		model := env.OpenAIModel
 		if model == "" {
 			model = "gpt-4.1-mini"
 		}
-		baseURL := os.Getenv("CHASE_CODE_OPENAI_BASE_URL")
+		baseURL := env.OpenAIBaseURL
 		if baseURL == "" {
 			baseURL = "https://api.openai.com/v1"
 		}
@@ -112,19 +115,19 @@ func NewLLMConfigFromEnv() (*LLMConfig, error) {
 
 	case ProviderKimi:
 		// Kimi（Moonshot）API：兼容 OpenAI 的 /v1/chat/completions
-		apiKey := os.Getenv("CHASE_CODE_KIMI_API_KEY")
+		apiKey := env.KimiAPIKey
 		if apiKey == "" {
 			// 兼容直接使用 MOONSHOT_API_KEY 的场景
-			apiKey = os.Getenv("MOONSHOT_API_KEY")
+			apiKey = env.MoonshotAPIKey
 		}
 		if apiKey == "" {
 			return nil, errors.New("缺少环境变量 CHASE_CODE_KIMI_API_KEY 或 MOONSHOT_API_KEY")
 		}
-		model := os.Getenv("CHASE_CODE_KIMI_MODEL")
+		model := env.KimiModel
 		if model == "" {
 			model = "kimi-k2-0905-preview"
 		}
-		baseURL := os.Getenv("CHASE_CODE_KIMI_BASE_URL")
+		baseURL := env.KimiBaseURL
 		if baseURL == "" {
 			baseURL = "https://api.moonshot.cn/v1"
 		}
@@ -156,7 +159,7 @@ func NewLLMConfigFromEnv() (*LLMConfig, error) {
 func NewLLMClient(cfg *LLMConfig) (LLMClient, error) {
 	// 初始化日志输出：优先使用显式指定的 CHASE_CODE_LOG_FILE，
 	// 否则在当前工作目录下按 SessionID 生成独立日志文件。
-	path := os.Getenv("CHASE_CODE_LOG_FILE")
+	path := config.Get().LogFile
 	if path == "" {
 		if cwd, err := os.Getwd(); err == nil {
 			// 生成形如 20251220-153005-4821 的 SessionID

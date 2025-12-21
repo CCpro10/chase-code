@@ -4,14 +4,14 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
-	"time"
 
 	"chase-code/agent"
+	"chase-code/config"
 	"chase-code/server"
-	servermcp "chase-code/server/mcp"
 	servertools "chase-code/server/tools"
 )
 
@@ -95,6 +95,7 @@ func getOrInitReplAgent() (*replAgentSession, error) {
 	if err != nil {
 		return nil, err
 	}
+	log.Printf("[config] %s", config.Get().Summary())
 
 	// 1. 基础本地工具
 	tools := servertools.DefaultToolSpecs()
@@ -107,26 +108,11 @@ func getOrInitReplAgent() (*replAgentSession, error) {
 	//     {"name": "fs", "command": "mcp-filesystem", "args": ["--root", "/path"], "env": ["FOO=bar"], "cwd": "/path"}
 	//   ]
 	// }
-	if cfgPath := os.Getenv("CHASE_CODE_MCP_CONFIG"); cfgPath != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		if mcpCfg, err := servermcp.LoadMCPConfig(cfgPath); err != nil {
-			fmt.Fprintf(os.Stderr, "加载 MCP 配置失败: %v\n", err)
-		} else if mcpCfg != nil {
-			clients, err := servermcp.NewMCPClientsFromConfig(mcpCfg)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "创建 MCP 客户端失败: %v\n", err)
-			} else if len(clients) > 0 {
-				_, mcpSpecs, err := servermcp.MergeMCPTools(ctx, clients)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "获取 MCP tools 列表失败: %v\n", err)
-				} else {
-					// 将 MCP tools 追加到工具列表，并用带 MCP 的 router 替换本地 router。
-					tools = append(tools, mcpSpecs...)
-					router = servertools.NewToolRouterWithMCP(tools, servermcp.MultiMCPClient(clients))
-				}
-			}
+	if cfgPath := config.Get().MCPConfigPath; cfgPath != "" {
+		var mcpErr error
+		tools, router, mcpErr = initMCPTools(cfgPath, tools, router)
+		if mcpErr != nil {
+			fmt.Fprintf(os.Stderr, "初始化 MCP 失败: %v\n", mcpErr)
 		}
 	}
 
