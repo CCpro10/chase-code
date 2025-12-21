@@ -122,7 +122,7 @@ func NewLLMConfigFromEnv() (*LLMConfig, error) {
 		}
 		model := os.Getenv("CHASE_CODE_KIMI_MODEL")
 		if model == "" {
-			model = "kimi-k2-turbo-preview"
+			model = "kimi-k2-0905-preview"
 		}
 		baseURL := os.Getenv("CHASE_CODE_KIMI_BASE_URL")
 		if baseURL == "" {

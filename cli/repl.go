@@ -273,7 +273,7 @@ func handleReplCommand(line string) (err error) {
 	return nil
 }
 
-const maxSteps = 10
+const maxSteps = 40
 
 func startAgentTurn(userInput string) error {
 	if !tryStartAgentTurn() {
