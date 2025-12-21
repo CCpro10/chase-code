@@ -194,13 +194,13 @@ func BuildToolSystemPrompt(tools []server.ToolSpec) string {
 	b.WriteString("- 执行工具后、继续根据用户需求，选择其他工具、直到完成用户的任务。\n\n")
 
 	// 工具列表（给模型一个清晰的总览）
-	b.WriteString("=== 可用工具列表（名称 / 描述 / 参数 Schema） ===\n")
+	b.WriteString("=== 可用工具列表（名称 / 描述 ） ===\n")
 	for i, t := range tools {
 		params := strings.TrimSpace(string(t.Parameters))
 		if params == "" {
 			params = "{}"
 		}
-		fmt.Fprintf(&b, "%d. %s — %s\n   parameters: %s\n", i+1, t.Name, t.Description, params)
+		fmt.Fprintf(&b, "%d. %s — %s\n   \n", i+1, t.Name, t.Description)
 	}
 	b.WriteString("\n")
 
