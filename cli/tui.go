@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/cellbuf"
 
 	"chase-code/server"
 )
@@ -18,6 +19,7 @@ const (
 	replInputHeight  = 1
 	replStatusHeight = 1
 	replScrollLines  = 6
+	replViewportPad  = 1
 )
 
 // replModel 负责管理 TUI 的状态与渲染。
@@ -64,7 +66,7 @@ func newReplModel(events <-chan server.Event) replModel {
 	input.Focus()
 
 	vp := viewport.New(0, 0)
-	vp.Style = lipgloss.NewStyle().PaddingLeft(1)
+	vp.Style = lipgloss.NewStyle().PaddingLeft(replViewportPad)
 
 	model := replModel{
 		input:    input,
@@ -184,7 +186,7 @@ func (m *replModel) appendLines(lines ...string) {
 	if len(m.lines) > replMaxLogLines {
 		m.lines = m.lines[len(m.lines)-replMaxLogLines:]
 	}
-	m.viewport.SetContent(strings.Join(m.lines, "\n"))
+	m.viewport.SetContent(renderWrappedContent(m.lines, m.viewport.Width))
 	if follow {
 		m.viewport.GotoBottom()
 	}
@@ -207,7 +209,7 @@ func (m *replModel) resize(width, height int) {
 		viewportHeight = 1
 	}
 	m.viewport.Height = viewportHeight
-	m.viewport.SetContent(strings.Join(m.lines, "\n"))
+	m.viewport.SetContent(renderWrappedContent(m.lines, m.viewport.Width))
 	m.viewport.GotoBottom()
 }
 
@@ -230,4 +232,17 @@ func replBannerLines() []string {
 		styleDim.Render(fmt.Sprintf("chase-code repl（agent 优先），当前工作目录: %s", cwd)),
 		styleDim.Render("直接输入问题或指令时，将通过 LLM+工具以 agent 方式执行；输入 :help 查看可用命令，:q 退出。"),
 	}
+}
+
+// renderWrappedContent 对日志内容做软换行，避免窗口缩窄后内容溢出。
+func renderWrappedContent(lines []string, width int) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	content := strings.Join(lines, "\n")
+	contentWidth := width - replViewportPad
+	if contentWidth < 1 {
+		return content
+	}
+	return cellbuf.Wrap(content, contentWidth, "")
 }
