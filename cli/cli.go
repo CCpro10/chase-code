@@ -135,6 +135,13 @@ func runShell(args []string) error {
 	}
 
 	if result != nil {
+		// 先输出命令的 stdout/stderr 内容。
+		if strings.TrimSpace(result.Output) != "" {
+			fmt.Fprint(os.Stdout, result.Output)
+			if !strings.HasSuffix(result.Output, "\n") {
+				fmt.Fprintln(os.Stdout)
+			}
+		}
 		if result.TimedOut {
 			fmt.Fprintf(os.Stderr, "命令超时 (耗时 %s)\n", result.Duration)
 		}

@@ -1,10 +1,12 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -41,6 +43,9 @@ type ExecResult struct {
 	ExitCode int
 	Duration time.Duration
 	TimedOut bool
+	// Output 为本次执行收集到的 stdout/stderr 文本，主要用于反馈给 LLM。
+	// CLI 模式下依然通过 StdoutColored/StderrColored 实时输出到终端。
+	Output string
 }
 
 func RunExec(p ExecParams, _ SandboxPolicy) (*ExecResult, error) {
@@ -53,8 +58,9 @@ func RunExec(p ExecParams, _ SandboxPolicy) (*ExecResult, error) {
 		defer cancel()
 	}
 
-	cmd := buildExecCommand(ctx, p)
-	return runExecCommand(ctx, cmd, p.Timeout)
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd := buildExecCommand(ctx, p, &stdoutBuf, &stderrBuf)
+	return runExecCommand(ctx, cmd, p.Timeout, &stdoutBuf, &stderrBuf)
 }
 
 // validateExecParams 校验执行参数的合法性。
@@ -74,7 +80,7 @@ func buildExecContext(timeout time.Duration) (context.Context, context.CancelFun
 }
 
 // buildExecCommand 构造待执行的命令对象。
-func buildExecCommand(ctx context.Context, p ExecParams) *exec.Cmd {
+func buildExecCommand(ctx context.Context, p ExecParams, stdoutBuf, stderrBuf *bytes.Buffer) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, p.Command[0], p.Command[1:]...)
 	if p.Cwd != "" {
 		cmd.Dir = p.Cwd
@@ -82,18 +88,21 @@ func buildExecCommand(ctx context.Context, p ExecParams) *exec.Cmd {
 	if len(p.Env) > 0 {
 		cmd.Env = p.Env
 	}
-	cmd.Stdout = StdoutColored
-	cmd.Stderr = StderrColored
+	// 仅写入缓冲区，由调用方决定是否、如何将输出写给用户。
+	cmd.Stdout = stdoutBuf
+	cmd.Stderr = stderrBuf
 	return cmd
 }
 
 // runExecCommand 执行命令并解析退出状态。
-func runExecCommand(ctx context.Context, cmd *exec.Cmd, timeout time.Duration) (*ExecResult, error) {
+func runExecCommand(ctx context.Context, cmd *exec.Cmd, timeout time.Duration, stdoutBuf, stderrBuf *bytes.Buffer) (*ExecResult, error) {
 	start := time.Now()
 	err := cmd.Run()
 	dur := time.Since(start)
 
-	result := &ExecResult{Duration: dur}
+	// 将 stdout/stderr 合并为一段文本返回给调用方，方便 LLM 使用。
+	mergedOutput := mergeExecOutput(stdoutBuf.String(), stderrBuf.String())
+	result := &ExecResult{Duration: dur, Output: mergedOutput}
 
 	if ctx.Err() == context.DeadlineExceeded {
 		result.TimedOut = true
@@ -108,6 +117,25 @@ func runExecCommand(ctx context.Context, cmd *exec.Cmd, timeout time.Duration) (
 
 	result.ExitCode = 0
 	return result, nil
+}
+
+// mergeExecOutput 将 stdout/stderr 文本合并为一段可读性较好的输出。
+// 目前策略较为简单：优先展示 stdout，若 stderr 非空则附加一个分隔标记。
+func mergeExecOutput(stdout, stderr string) string {
+	stdout = strings.TrimRight(stdout, "\n")
+	stderr = strings.TrimRight(stderr, "\n")
+
+	if stdout == "" && stderr == "" {
+		return ""
+	}
+	if stdout == "" {
+		return stderr
+	}
+	if stderr == "" {
+		return stdout
+	}
+
+	return stdout + "\n--- stderr ---\n" + stderr
 }
 
 // exitCodeFromError 从 exec 错误中提取退出码。

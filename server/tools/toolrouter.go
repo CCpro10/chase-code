@@ -132,8 +132,15 @@ func (r *ToolRouter) execShell(_ context.Context, call server.ToolCall) (server.
 		return server.ResponseItem{}, err
 	}
 
+	// 将命令输出与元信息一起返回给模型，便于后续推理。
+	// 约定：先给出原始输出，末尾附加一行 summary。
+	output := strings.TrimRight(res.Output, "\n")
+	if output == "" {
+		output = "(no output)"
+	}
 	summary := fmt.Sprintf("command=%q exit_code=%d duration=%s timed_out=%v", args.Command, res.ExitCode, res.Duration, res.TimedOut)
-	return server.ResponseItem{Type: server.ResponseItemToolResult, ToolName: "shell", ToolOutput: summary, CallID: call.CallID}, nil
+	toolOutput := output + "\n---\n" + summary
+	return server.ResponseItem{Type: server.ResponseItemToolResult, ToolName: "shell", ToolOutput: toolOutput, CallID: call.CallID}, nil
 }
 
 // ---------------- read_file ----------------
