@@ -153,6 +153,7 @@ func initToolRouter() ([]server.ToolSpec, *servertools.ToolRouter) {
 }
 
 func runRepl() error {
+	ensureTerminalEraseKey()
 	printReplBanner()
 
 	scanner := bufio.NewScanner(os.Stdin)

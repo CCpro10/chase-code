@@ -77,11 +77,11 @@ func renderToolOutput(toolName, message string) {
 // renderToolFinished 渲染工具结束事件。
 func renderToolFinished(toolName, message string) {
 	if message != "" {
-		fmt.Fprintf(os.Stderr, "%s    [tool %s 完成]%s %s\n", colorYellow, toolName, colorReset, message)
+		fmt.Fprintf(os.Stderr, "%s    [tool %s 完成]%s %s\n", colorGreen, toolName, colorReset, message)
 		return
 	}
 	if toolName != "" {
-		fmt.Fprintf(os.Stderr, "%s    [tool %s 完成]%s\n", colorYellow, toolName, colorReset)
+		fmt.Fprintf(os.Stderr, "%s    [tool %s 完成]%s\n", colorGreen, toolName, colorReset)
 	}
 }
 
