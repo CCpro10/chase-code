@@ -243,70 +243,21 @@ type grepFilesArgs struct {
 }
 
 func (r *ToolRouter) execGrepFiles(call server.ToolCall) (server.ResponseItem, error) {
-	var args grepFilesArgs
-	if err := json.Unmarshal(call.Arguments, &args); err != nil {
-		return server.ResponseItem{}, fmt.Errorf("解析 grep_files 参数失败: %w", err)
-	}
-	root := strings.TrimSpace(args.Root)
-	if root == "" {
-		root = "."
-	}
-	if strings.TrimSpace(args.Pattern) == "" {
-		return server.ResponseItem{}, fmt.Errorf("grep_files 需要非空 pattern 字段")
-	}
-	maxMatches := args.MaxMatches
-	if maxMatches <= 0 {
-		maxMatches = 200
+	args, err := parseGrepFilesArgs(call.Arguments)
+	if err != nil {
+		return server.ResponseItem{}, err
 	}
 
-	// 优先尝试使用 ripgrep，如果系统中安装了 rg，则直接利用 rg 的搜索能力，
-	// 以便在大仓库中快速模糊/正则查找代码（模仿 codex 的用法）。
-	out, err := runRipgrep(root, args.Pattern, maxMatches)
+	out, err := runRipgrep(args.Root, args.Pattern, args.MaxMatches)
 	if err == nil {
-		if strings.TrimSpace(out) == "" {
-			out = "未找到匹配项"
-		}
-		return server.ResponseItem{Type: server.ResponseItemToolResult, ToolName: "grep_files", ToolOutput: out}, nil
+		return buildGrepResult(call.CallID, out), nil
 	}
 
-	// 如果 rg 不存在或调用失败，则回退到原来的 Go WalkDir + 子串搜索实现，
-	// 以保证工具在没有 ripgrep 的环境中仍然可用。
-
-	var (
-		b       strings.Builder
-		matches int
-	)
-
-	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		if !strings.Contains(string(data), args.Pattern) {
-			return nil
-		}
-		fmt.Fprintf(&b, "%s: 包含子串 %q\n", path, args.Pattern)
-		matches++
-		if matches >= maxMatches {
-			return io.EOF
-		}
-		return nil
-	})
-	if walkErr != nil && !errors.Is(walkErr, io.EOF) {
-		return server.ResponseItem{}, fmt.Errorf("遍历目录失败: %w", walkErr)
+	out, err = runGrepFallback(args)
+	if err != nil {
+		return server.ResponseItem{}, err
 	}
-
-	if matches == 0 {
-		b.WriteString("未找到匹配项")
-	}
-
-	return server.ResponseItem{Type: server.ResponseItemToolResult, ToolName: "grep_files", ToolOutput: b.String(), CallID: call.CallID}, nil
+	return buildGrepResult(call.CallID, out), nil
 }
 
 // runRipgrep 使用 rg(1) 在 root 下搜索 pattern，并限制返回的匹配行数。
@@ -334,4 +285,75 @@ func runRipgrep(root, pattern string, maxMatches int) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// parseGrepFilesArgs 解析并标准化 grep_files 参数。
+func parseGrepFilesArgs(raw json.RawMessage) (grepFilesArgs, error) {
+	var args grepFilesArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return grepFilesArgs{}, fmt.Errorf("解析 grep_files 参数失败: %w", err)
+	}
+	args.Root = strings.TrimSpace(args.Root)
+	if args.Root == "" {
+		args.Root = "."
+	}
+	if strings.TrimSpace(args.Pattern) == "" {
+		return grepFilesArgs{}, fmt.Errorf("grep_files 需要非空 pattern 字段")
+	}
+	if args.MaxMatches <= 0 {
+		args.MaxMatches = 200
+	}
+	return args, nil
+}
+
+// runGrepFallback 使用 WalkDir 进行子串匹配，作为 rg 的回退方案。
+func runGrepFallback(args grepFilesArgs) (string, error) {
+	var (
+		b       strings.Builder
+		matches int
+	)
+
+	walkErr := filepath.WalkDir(args.Root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		if !strings.Contains(string(data), args.Pattern) {
+			return nil
+		}
+		fmt.Fprintf(&b, "%s: 包含子串 %q\n", path, args.Pattern)
+		matches++
+		if matches >= args.MaxMatches {
+			return io.EOF
+		}
+		return nil
+	})
+	if walkErr != nil && !errors.Is(walkErr, io.EOF) {
+		return "", fmt.Errorf("遍历目录失败: %w", walkErr)
+	}
+
+	if matches == 0 {
+		b.WriteString("未找到匹配项")
+	}
+
+	return b.String(), nil
+}
+
+// buildGrepResult 标准化 grep_files 输出结果。
+func buildGrepResult(callID, output string) server.ResponseItem {
+	if strings.TrimSpace(output) == "" {
+		output = "未找到匹配项"
+	}
+	return server.ResponseItem{
+		Type:       server.ResponseItemToolResult,
+		ToolName:   "grep_files",
+		ToolOutput: output,
+		CallID:     callID,
+	}
 }
