@@ -90,9 +90,7 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 
 	log.Printf("[agent] new turn input=%q history_len=%d", userInput, len(history))
 
-	if s.Sink != nil {
-		s.Sink.SendEvent(server.Event{Kind: server.EventTurnStarted, Time: time.Now()})
-	}
+	s.Sink.SendEvent(server.Event{Kind: server.EventTurnStarted, Time: time.Now()})
 
 	baseCtx := ctx
 	if baseCtx == nil {
@@ -101,9 +99,7 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 
 	for step := 0; step < maxSteps; step++ {
 		// 1) 调用 LLM
-		if s.Sink != nil {
-			s.Sink.SendEvent(server.Event{Kind: server.EventAgentThinking, Time: time.Now(), Step: step})
-		}
+		s.Sink.SendEvent(server.Event{Kind: server.EventAgentThinking, Time: time.Now(), Step: step})
 
 		// 每一轮根据当前历史构造 Prompt
 		prompt := server.Prompt{
@@ -151,15 +147,13 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 
 		// 如果既没有 function call，也没有有效的文本工具 JSON，则视为最终回答
 		if len(calls) == 0 {
-			if s.Sink != nil {
-				s.Sink.SendEvent(server.Event{
-					Kind:    server.EventAgentTextDone,
-					Time:    time.Now(),
-					Step:    step,
-					Message: reply,
-				})
-				s.Sink.SendEvent(server.Event{Kind: server.EventTurnFinished, Time: time.Now(), Step: step})
-			}
+			s.Sink.SendEvent(server.Event{
+				Kind:    server.EventAgentTextDone,
+				Time:    time.Now(),
+				Step:    step,
+				Message: reply,
+			})
+			s.Sink.SendEvent(server.Event{Kind: server.EventTurnFinished, Time: time.Now(), Step: step})
 
 			return itemsToMessages(cm.History()), nil
 		}
@@ -171,14 +165,12 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 		}
 
 		// 有工具调用时，先发送“规划”事件，方便 CLI 展示原始 JSON 或 function 调用情况
-		if s.Sink != nil {
-			s.Sink.SendEvent(server.Event{
-				Kind:    server.EventToolPlanned,
-				Time:    time.Now(),
-				Step:    step,
-				Message: reply,
-			})
-		}
+		s.Sink.SendEvent(server.Event{
+			Kind:    server.EventToolPlanned,
+			Time:    time.Now(),
+			Step:    step,
+			Message: reply,
+		})
 		log.Printf("[agent] step=%d resolved %d tool_calls", step, len(calls))
 
 		// 3) 依次执行所有工具调用，将输出写回历史，供下一轮 LLM 使用
@@ -204,15 +196,13 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 			}
 
 			if execErr != nil {
-				if s.Sink != nil {
-					s.Sink.SendEvent(server.Event{
-						Kind:     server.EventToolFinished,
-						Time:     time.Now(),
-						Step:     step,
-						ToolName: c.ToolName,
-						Message:  "工具执行失败: " + execErr.Error(),
-					})
-				}
+				s.Sink.SendEvent(server.Event{
+					Kind:     server.EventToolFinished,
+					Time:     time.Now(),
+					Step:     step,
+					ToolName: c.ToolName,
+					Message:  "工具执行失败: " + execErr.Error(),
+				})
 				log.Printf("[agent] step=%d tool=%s error=%v", step, c.ToolName, execErr)
 
 				// 同时把失败信息写回历史，避免模型误以为工具执行成功。
@@ -226,21 +216,19 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 				continue
 			}
 
-			if s.Sink != nil {
-				s.Sink.SendEvent(server.Event{
-					Kind:     server.EventToolOutputDelta,
-					Time:     time.Now(),
-					Step:     step,
-					ToolName: c.ToolName,
-					Message:  item.ToolOutput,
-				})
-				s.Sink.SendEvent(server.Event{
-					Kind:     server.EventToolFinished,
-					Time:     time.Now(),
-					Step:     step,
-					ToolName: c.ToolName,
-				})
-			}
+			s.Sink.SendEvent(server.Event{
+				Kind:     server.EventToolOutputDelta,
+				Time:     time.Now(),
+				Step:     step,
+				ToolName: c.ToolName,
+				Message:  item.ToolOutput,
+			})
+			s.Sink.SendEvent(server.Event{
+				Kind:     server.EventToolFinished,
+				Time:     time.Now(),
+				Step:     step,
+				ToolName: c.ToolName,
+			})
 			log.Printf("[agent] step=%d tool=%s done output_len=%d", step, c.ToolName, len(item.ToolOutput))
 
 			// 3.2 把工具结果以 ResponseItem 形式写回历史，
@@ -255,14 +243,12 @@ func (s *Session) RunTurn(ctx context.Context, userInput string, history []serve
 	}
 
 	// 达到最大步数仍未返回最终回答
-	if s.Sink != nil {
-		s.Sink.SendEvent(server.Event{
-			Kind:    server.EventTurnFinished,
-			Time:    time.Now(),
-			Step:    s.MaxSteps,
-			Message: "达到最大步数，终止",
-		})
-	}
+	s.Sink.SendEvent(server.Event{
+		Kind:    server.EventTurnFinished,
+		Time:    time.Now(),
+		Step:    s.MaxSteps,
+		Message: "达到最大步数，终止",
+	})
 
 	return itemsToMessages(cm.History()), nil
 }
@@ -341,14 +327,12 @@ func (s *Session) executeApplyPatchWithSafety(ctx context.Context, call server.T
 	switch decision.Level {
 	case servertools.PatchSafe:
 		// 直接执行
-		if s.Sink != nil {
-			s.Sink.SendEvent(server.Event{
-				Kind:     server.EventToolStarted,
-				Time:     time.Now(),
-				Step:     step,
-				ToolName: call.ToolName,
-			})
-		}
+		s.Sink.SendEvent(server.Event{
+			Kind:     server.EventToolStarted,
+			Time:     time.Now(),
+			Step:     step,
+			ToolName: call.ToolName,
+		})
 		return s.Router.Execute(ctx, call)
 
 	case servertools.PatchReject:
@@ -356,66 +340,58 @@ func (s *Session) executeApplyPatchWithSafety(ctx context.Context, call server.T
 		if reason == "" {
 			reason = "补丁被安全策略拒绝"
 		}
-		if s.Sink != nil {
-			s.Sink.SendEvent(server.Event{
-				Kind:     server.EventToolFinished,
-				Time:     time.Now(),
-				Step:     step,
-				ToolName: call.ToolName,
-				Message:  "patch rejected: " + reason,
-			})
-		}
+		s.Sink.SendEvent(server.Event{
+			Kind:     server.EventToolFinished,
+			Time:     time.Now(),
+			Step:     step,
+			ToolName: call.ToolName,
+			Message:  "patch rejected: " + reason,
+		})
 		return server.ResponseItem{}, fmt.Errorf("补丁被拒绝: %s", reason)
 
 	case servertools.PatchAskUser:
 		// 向 CLI 发送审批请求事件，并等待用户决策
 		reqID := fmt.Sprintf("patch-%d-%d", time.Now().UnixNano(), step)
-		if s.Sink != nil {
-			s.Sink.SendEvent(server.Event{
-				Kind:      server.EventPatchApprovalRequest,
-				Time:      time.Now(),
-				Step:      step,
-				ToolName:  call.ToolName,
-				RequestID: reqID,
-				Paths:     decision.Paths,
-				Message:   decision.Reason,
-			})
-		}
+		s.Sink.SendEvent(server.Event{
+			Kind:      server.EventPatchApprovalRequest,
+			Time:      time.Now(),
+			Step:      step,
+			ToolName:  call.ToolName,
+			RequestID: reqID,
+			Paths:     decision.Paths,
+			Message:   decision.Reason,
+		})
 
 		approved, err := s.waitForApproval(ctx, reqID)
 		if err != nil {
 			return server.ResponseItem{}, err
 		}
 		if !approved {
-			if s.Sink != nil {
-				s.Sink.SendEvent(server.Event{
-					Kind:      server.EventPatchApprovalResult,
-					Time:      time.Now(),
-					Step:      step,
-					ToolName:  call.ToolName,
-					RequestID: reqID,
-					Message:   "patch rejected by user",
-				})
-			}
-			return server.ResponseItem{}, fmt.Errorf("补丁被用户拒绝")
-		}
-
-		if s.Sink != nil {
 			s.Sink.SendEvent(server.Event{
 				Kind:      server.EventPatchApprovalResult,
 				Time:      time.Now(),
 				Step:      step,
 				ToolName:  call.ToolName,
 				RequestID: reqID,
-				Message:   "patch approved",
+				Message:   "patch rejected by user",
 			})
-			s.Sink.SendEvent(server.Event{
-				Kind:     server.EventToolStarted,
-				Time:     time.Now(),
-				Step:     step,
-				ToolName: call.ToolName,
-			})
+			return server.ResponseItem{}, fmt.Errorf("补丁被用户拒绝")
 		}
+
+		s.Sink.SendEvent(server.Event{
+			Kind:      server.EventPatchApprovalResult,
+			Time:      time.Now(),
+			Step:      step,
+			ToolName:  call.ToolName,
+			RequestID: reqID,
+			Message:   "patch approved",
+		})
+		s.Sink.SendEvent(server.Event{
+			Kind:     server.EventToolStarted,
+			Time:     time.Now(),
+			Step:     step,
+			ToolName: call.ToolName,
+		})
 		return s.Router.Execute(ctx, call)
 	}
 

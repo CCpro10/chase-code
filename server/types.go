@@ -12,12 +12,15 @@ const (
 	RoleSystem    Role = "system"
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
+	RoleTool      Role = "tool"
 )
 
 // Message 是对话的一条消息，类似 OpenAI 的 chat message。
 type Message struct {
-	Role    Role   `json:"role"`
-	Content string `json:"content"`
+	Role       Role   `json:"role"`
+	Content    string `json:"content"`
+	Name       string `json:"name,omitempty"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 // Prompt 对应一次调用的完整输入。
@@ -119,8 +122,15 @@ func (c *ContextManager) BuildPromptMessages() []Message {
 			})
 
 		case ResponseItemToolResult:
-			// 工具结果不再塞进 Messages，避免被误当成 assistant 文本。
-			continue
+			if it.ToolName == "" && it.ToolOutput == "" {
+				continue
+			}
+			msgs = append(msgs, Message{
+				Role:       RoleTool,
+				Content:    truncateToolOutput(it.ToolOutput),
+				Name:       it.ToolName,
+				ToolCallID: it.CallID,
+			})
 
 		case ResponseItemToolCall:
 			// 是否把工具调用计划暴露给模型由你决定：

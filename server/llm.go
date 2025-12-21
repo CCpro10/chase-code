@@ -328,7 +328,12 @@ func (c *OpenAIClient) buildChatRequest(p Prompt) openAIChatRequest {
 	} else {
 		msgs = make([]openAIChatMessage, 0, len(p.Messages))
 		for _, m := range p.Messages {
-			msgs = append(msgs, openAIChatMessage{Role: string(m.Role), Content: m.Content})
+			msgs = append(msgs, openAIChatMessage{
+				Role:       string(m.Role),
+				Content:    m.Content,
+				Name:       m.Name,
+				ToolCallID: m.ToolCallID,
+			})
 		}
 	}
 
