@@ -67,6 +67,9 @@ type ResponseItem struct {
 	Role Role   `json:"role,omitempty"`
 	Text string `json:"text,omitempty"`
 
+	// ToolCalls 仅用于 assistant 消息，表示与该回复绑定的工具调用。
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+
 	ToolName      string          `json:"tool_name,omitempty"`
 	ToolArguments json.RawMessage `json:"tool_arguments,omitempty"`
 	ToolOutput    string          `json:"tool_output,omitempty"`

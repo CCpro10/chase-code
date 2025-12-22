@@ -157,15 +157,15 @@ func (s *Session) runTurnStep(turn *turnContext, step int) (bool, error) {
 
 	reply := res.Message.Content
 	s.logLLMReply(step, reply, res.ToolCalls)
-	s.recordAssistantReply(turn.cm, reply)
 
 	calls := s.resolveToolCalls(res, reply, step)
+	s.ensureCallIDs(calls, step)
+	s.recordAssistantReply(turn.cm, reply, calls)
 	if len(calls) == 0 {
 		s.emitFinalReply(step, reply)
 		return true, nil
 	}
 
-	s.ensureCallIDs(calls, step)
 	s.emitToolPlan(step, reply)
 	s.executeToolCalls(turn.baseCtx, turn.cm, calls, step)
 
@@ -202,16 +202,38 @@ func (s *Session) logLLMReply(step int, reply string, toolCalls []server.ToolCal
 	log.Printf("[agent] step=%d LLM reply preview:\n%s", step, previewLLMReplyForLog(reply))
 }
 
-// recordAssistantReply 将 LLM 输出写入上下文历史。
-func (s *Session) recordAssistantReply(cm *server.ContextManager, reply string) {
-	if strings.TrimSpace(reply) == "" {
+// recordAssistantReply 将 LLM 输出及其工具调用写入上下文历史。
+func (s *Session) recordAssistantReply(cm *server.ContextManager, reply string, calls []server.ToolCall) {
+	if strings.TrimSpace(reply) == "" && len(calls) == 0 {
 		return
 	}
-	cm.Record(server.ResponseItem{
+	item := server.ResponseItem{
 		Type: server.ResponseItemMessage,
 		Role: server.RoleAssistant,
 		Text: reply,
-	})
+	}
+	if len(calls) > 0 {
+		item.ToolCalls = cloneToolCalls(calls)
+	}
+	cm.Record(item)
+}
+
+// cloneToolCalls 深拷贝工具调用，避免后续修改影响历史记录。
+func cloneToolCalls(calls []server.ToolCall) []server.ToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]server.ToolCall, 0, len(calls))
+	for _, call := range calls {
+		copied := call
+		if len(call.Arguments) > 0 {
+			args := make(json.RawMessage, len(call.Arguments))
+			copy(args, call.Arguments)
+			copied.Arguments = args
+		}
+		out = append(out, copied)
+	}
+	return out
 }
 
 // resolveToolCalls 解析工具调用，优先使用 function calling，失败时退回文本协议。
@@ -285,12 +307,6 @@ func (s *Session) executeToolCalls(ctx context.Context, cm *server.ContextManage
 // executeSingleToolCall 执行单个工具调用，并将结果写回 ContextManager。
 func (s *Session) executeSingleToolCall(ctx context.Context, cm *server.ContextManager, call server.ToolCall, step int) {
 	log.Printf("[agent] step=%d executing tool=%s", step, call.ToolName)
-	cm.Record(server.ResponseItem{
-		Type:          server.ResponseItemToolCall,
-		ToolName:      call.ToolName,
-		ToolArguments: call.Arguments,
-		CallID:        call.CallID,
-	})
 
 	item, execErr := s.executeToolCall(ctx, call, step)
 	if execErr != nil {

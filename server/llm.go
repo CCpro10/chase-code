@@ -273,7 +273,8 @@ type openAIFunctionDef struct {
 // buildMessagesFromItems 将高层的 ResponseItem 历史转换为底层 OpenAI Chat 消息。
 // 这里会：
 //   - 将普通对话消息映射为 user/assistant 等角色；
-//   - 将工具输出映射为 role:"tool" 的消息，并在可能的情况下携带 tool_call_id。
+//   - 将工具输出映射为 role:"tool" 的消息，并在可能的情况下携带 tool_call_id；
+//   - 对 assistant 消息携带的 tool_calls 直接写入同一条消息。
 func buildMessagesFromItems(items []ResponseItem) []openAIChatMessage {
 	msgs := make([]openAIChatMessage, 0, len(items))
 	for _, it := range items {
@@ -288,10 +289,14 @@ func buildMessagesFromItems(items []ResponseItem) []openAIChatMessage {
 func messageFromItem(it ResponseItem) (openAIChatMessage, bool) {
 	switch it.Type {
 	case ResponseItemMessage:
-		return openAIChatMessage{
+		msg := openAIChatMessage{
 			Role:    string(it.Role),
 			Content: it.Text,
-		}, true
+		}
+		if it.Role == RoleAssistant && len(it.ToolCalls) > 0 {
+			msg.ToolCalls = openAIToolCallsFromToolCalls(it.ToolCalls)
+		}
+		return msg, true
 
 	case ResponseItemToolResult:
 		if it.ToolName == "" && it.ToolOutput == "" {
@@ -305,29 +310,48 @@ func messageFromItem(it ResponseItem) (openAIChatMessage, bool) {
 		}, true
 
 	case ResponseItemToolCall:
-		if it.ToolName == "" {
+		// 兼容旧历史结构：独立的 tool_call 仍然映射为一条 assistant 消息。
+		calls := openAIToolCallsFromToolCalls([]ToolCall{{
+			ToolName:  it.ToolName,
+			Arguments: it.ToolArguments,
+			CallID:    it.CallID,
+		}})
+		if len(calls) == 0 {
 			return openAIChatMessage{}, false
 		}
-		args := strings.TrimSpace(string(it.ToolArguments))
-		if args == "" {
-			args = "{}"
-		}
 		return openAIChatMessage{
-			Role: "assistant",
-			ToolCalls: []openAIToolCall{
-				{
-					ID:   it.CallID,
-					Type: "function",
-					Function: openAIToolCallFunction{
-						Name:      it.ToolName,
-						Arguments: args,
-					},
-				},
-			},
+			Role:      "assistant",
+			ToolCalls: calls,
 		}, true
 	default:
 		return openAIChatMessage{}, false
 	}
+}
+
+// openAIToolCallsFromToolCalls 转换内部 ToolCall 为 OpenAI tool_calls 结构。
+func openAIToolCallsFromToolCalls(calls []ToolCall) []openAIToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]openAIToolCall, 0, len(calls))
+	for _, call := range calls {
+		if strings.TrimSpace(call.ToolName) == "" {
+			continue
+		}
+		args := strings.TrimSpace(string(call.Arguments))
+		if args == "" {
+			args = "{}"
+		}
+		out = append(out, openAIToolCall{
+			ID:   call.CallID,
+			Type: "function",
+			Function: openAIToolCallFunction{
+				Name:      call.ToolName,
+				Arguments: args,
+			},
+		})
+	}
+	return out
 }
 
 // openAIChatResponse 对应 Chat Completions 的响应结构。
