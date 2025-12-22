@@ -7,6 +7,10 @@ import (
 	"chase-code/server"
 )
 
+const (
+	toolOutputPreviewLines = 4
+)
+
 // formatEvent 将事件转为可渲染的多行文本。
 func formatEvent(ev server.Event) []string {
 	switch ev.Kind {
@@ -67,7 +71,8 @@ func formatToolOutput(toolName, message string) []string {
 		return nil
 	}
 	lines := []string{styleDim.Render(fmt.Sprintf("      [tool %s 输出]", toolName))}
-	return append(lines, indentLines(message, 8)...)
+	preview := truncateToolOutputLines(message, toolOutputPreviewLines)
+	return append(lines, indentLines(strings.Join(preview, "\n"), 8)...)
 }
 
 // formatToolFinished 渲染工具结束事件。
@@ -79,6 +84,19 @@ func formatToolFinished(toolName, message string) []string {
 		return nil
 	}
 	return []string{styleGreen.Render(fmt.Sprintf("    [tool %s 完成]", toolName))}
+}
+
+// truncateToolOutputLines 仅保留前几行工具输出，其余用摘要行表示。
+func truncateToolOutputLines(message string, maxLines int) []string {
+	trimmed := strings.TrimRight(message, "\n")
+	lines := splitLines(trimmed)
+	if maxLines <= 0 || len(lines) <= maxLines {
+		return lines
+	}
+	remaining := len(lines) - maxLines
+	summary := fmt.Sprintf("... (+%d line(s))", remaining)
+	out := append(lines[:maxLines], summary)
+	return out
 }
 
 // formatPatchApprovalRequest 渲染补丁审批请求事件。

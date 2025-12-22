@@ -35,6 +35,7 @@ type replModel struct {
 	width             int
 	height            int
 	maxLogLines       int
+	mouseEnabled      bool
 }
 
 type replEventMsg struct {
@@ -54,7 +55,11 @@ func runReplTUI(events <-chan server.Event) error {
 		return fmt.Errorf("事件通道未初始化")
 	}
 	model := newReplModel(events)
-	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
+	options := []tea.ProgramOption{tea.WithAltScreen()}
+	if model.mouseEnabled {
+		options = append(options, tea.WithMouseAllMotion())
+	}
+	program := tea.NewProgram(model, options...)
 	_, err := program.Run()
 	return err
 }
@@ -72,10 +77,11 @@ func newReplModel(events <-chan server.Event) replModel {
 	vp.Style = lipgloss.NewStyle().PaddingLeft(replViewportPad)
 
 	model := replModel{
-		input:       input,
-		viewport:    vp,
-		events:      events,
-		maxLogLines: resolveMaxLogLines(),
+		input:        input,
+		viewport:     vp,
+		events:       events,
+		maxLogLines:  resolveMaxLogLines(),
+		mouseEnabled: resolveMouseEnabled(),
 	}
 	model.appendLines(replBannerLines()...)
 	return model
@@ -118,13 +124,15 @@ func (m replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, replDispatchCmd(line, m.pendingApprovalID)
 		}
 	case tea.MouseMsg:
-		switch msg.Type {
-		case tea.MouseWheelUp:
-			m.scrollByLines(-replMouseScrollLines)
-			return m, nil
-		case tea.MouseWheelDown:
-			m.scrollByLines(replMouseScrollLines)
-			return m, nil
+		if m.mouseEnabled {
+			switch msg.Type {
+			case tea.MouseWheelUp:
+				m.scrollByLines(-replMouseScrollLines)
+				return m, nil
+			case tea.MouseWheelDown:
+				m.scrollByLines(replMouseScrollLines)
+				return m, nil
+			}
 		}
 	case replEventMsg:
 		m.applyEvent(msg.event)
@@ -247,7 +255,10 @@ func (m *replModel) resize(width, height int) {
 
 // statusLine 渲染底部状态栏。
 func (m replModel) statusLine() string {
-	parts := []string{"Ctrl+C 退出", "Enter 发送", "PgUp/PgDn 或滚轮滚动"}
+	parts := []string{"Ctrl+C 退出", "Enter 发送", "PgUp/PgDn 滚动"}
+	if m.mouseEnabled {
+		parts = append(parts, "滚轮滚动")
+	}
 	if isAgentRunning() {
 		parts = append(parts, "agent 处理中")
 	}
@@ -339,4 +350,18 @@ func resolveMaxLogLines() int {
 		return replMaxLogLinesDefault
 	}
 	return value
+}
+
+// resolveMouseEnabled 读取鼠标事件开关，避免影响终端文本选择。
+func resolveMouseEnabled() bool {
+	raw := strings.TrimSpace(os.Getenv("CHASE_CODE_TUI_MOUSE"))
+	if raw == "" {
+		return false
+	}
+	switch strings.ToLower(raw) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }
