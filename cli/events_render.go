@@ -161,10 +161,18 @@ func indentLines(s string, spaces int) []string {
 	return lines
 }
 
-// splitLines 安全拆分文本行，保留原始空行。
+// splitLines 安全拆分文本行，移除末尾多余换行并过滤空行。
 func splitLines(s string) []string {
+	s = strings.TrimSuffix(s, "\n")
 	if s == "" {
-		return []string{""}
+		return nil
 	}
-	return strings.Split(s, "\n")
+	parts := strings.Split(s, "\n")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

@@ -150,8 +150,6 @@ func initToolRouter() ([]server.ToolSpec, *servertools.ToolRouter) {
 }
 
 func runRepl() error {
-	// todo 暂时关闭终端退格修复：观察一段时间后再决定是否删除相关逻辑。
-	// ensureTerminalEraseKey()
 	events := getReplEvents()
 	return runReplTUI(events)
 }

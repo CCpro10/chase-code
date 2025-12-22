@@ -166,10 +166,11 @@ func replDispatchCmd(line string, pendingApprovalID string) tea.Cmd {
 
 // printReplLinesCmd 将输出写入终端滚动区，而不是渲染在 TUI 视口内。
 func printReplLinesCmd(lines []string) tea.Cmd {
-	if len(lines) == 0 {
+	clean := sanitizeLines(lines)
+	if len(clean) == 0 {
 		return nil
 	}
-	text := strings.Join(sanitizeLines(lines), "\n")
+	text := strings.Join(clean, "\n")
 	return tea.Printf("%s\n", text)
 }
 
@@ -214,11 +215,11 @@ func (m replModel) inputBoxView() string {
 func replBannerLines() []string {
 	cwd, _ := os.Getwd()
 	logo := []string{
-		"  ____ _                      ____          _      ",
-		" / ___| |__   __ _ ___  ___  / ___|___   __| | ___ ",
-		"| |   | '_ \\ / _` / __|/ _ \\| |   / _ \\ / _` |/ _ \\",
-		"| |___| | | | (_| \\__ \\  __/| |__| (_) | (_| |  __/",
-		" \\____|_| |_|\\__,_|___/\\___| \\____\\___/ \\__,_|\\___|",
+		"  ______ __  __  ___   ____  ____    ______ ____  ____  ____ ",
+		" / ____// / / / /   | / ___// ____/  / ____// __ \\/ __ \\/ ____/",
+		"/ /    / /_/ / / /| | \\__ \\/ __/    / /    / / / / / / / __/   ",
+		"/ /___ / __  / / ___ |___/ / /___   / /___ / /_/ / /_/ / /___   ",
+		"\\____//_/ /_/ /_/  |_/____/_____/   \\____/ \\____/ \\____/_____/  ",
 	}
 
 	lines := make([]string, 0, len(logo)+6)
@@ -229,8 +230,7 @@ func replBannerLines() []string {
 			lines = append(lines, styleBannerA.Render(line))
 		}
 	}
-	lines = append(lines, "")
-	lines = append(lines, styleDim.Render(fmt.Sprintf("chase-code repl（agent 优先），当前工作目录: %s", cwd)))
+	lines = append(lines, styleDim.Render(fmt.Sprintf("当前工作目录: %s", cwd)))
 	lines = append(lines, replGuideBox())
 	lines = append(lines, styleDim.Render("输入 /help 查看可用命令，/q 退出。"))
 	return lines
@@ -249,7 +249,7 @@ func replGuideBox() string {
 
 // inputBoxContentWidth 计算输入框可用于文本的实际宽度。
 func inputBoxContentWidth(totalWidth int) int {
-	content := totalWidth - 2 - inputBoxPadding*2
+	content := totalWidth - inputBoxPadding*2
 	if content < 0 {
 		return 0
 	}
