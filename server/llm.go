@@ -572,6 +572,7 @@ func extractToolCalls(msg openAIChatResponseMessage) []ToolCall {
 	return toolCalls
 }
 
+// Stream 以流式接口返回一次完整的响应，便于与现有调用方保持兼容。
 func (c *OpenAIClient) Stream(ctx context.Context, p Prompt) *LLMStream {
 	ch := make(chan LLMEvent, 8)
 	stream := &LLMStream{C: ch}

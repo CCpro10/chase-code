@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -15,11 +16,12 @@ import (
 )
 
 const (
-	replMaxLogLines  = 2000
-	replInputHeight  = 1
-	replStatusHeight = 1
-	replScrollLines  = 6
-	replViewportPad  = 1
+	replMaxLogLinesDefault = 8000
+	replInputHeight        = 1
+	replStatusHeight       = 1
+	replScrollLines        = 6
+	replMouseScrollLines   = 3
+	replViewportPad        = 1
 )
 
 // replModel 负责管理 TUI 的状态与渲染。
@@ -32,6 +34,7 @@ type replModel struct {
 	ready             bool
 	width             int
 	height            int
+	maxLogLines       int
 }
 
 type replEventMsg struct {
@@ -51,7 +54,7 @@ func runReplTUI(events <-chan server.Event) error {
 		return fmt.Errorf("事件通道未初始化")
 	}
 	model := newReplModel(events)
-	program := tea.NewProgram(model, tea.WithAltScreen())
+	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
 	_, err := program.Run()
 	return err
 }
@@ -69,9 +72,10 @@ func newReplModel(events <-chan server.Event) replModel {
 	vp.Style = lipgloss.NewStyle().PaddingLeft(replViewportPad)
 
 	model := replModel{
-		input:    input,
-		viewport: vp,
-		events:   events,
+		input:       input,
+		viewport:    vp,
+		events:      events,
+		maxLogLines: resolveMaxLogLines(),
 	}
 	model.appendLines(replBannerLines()...)
 	return model
@@ -93,10 +97,16 @@ func (m replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlC, tea.KeyCtrlD:
 			return m, tea.Quit
 		case tea.KeyPgUp:
-			m.viewport.LineUp(replScrollLines)
+			m.scrollByLines(-replScrollLines)
 			return m, nil
 		case tea.KeyPgDown:
-			m.viewport.LineDown(replScrollLines)
+			m.scrollByLines(replScrollLines)
+			return m, nil
+		case tea.KeyHome:
+			m.viewport.GotoTop()
+			return m, nil
+		case tea.KeyEnd:
+			m.viewport.GotoBottom()
 			return m, nil
 		case tea.KeyEnter:
 			line := strings.TrimSpace(m.input.Value())
@@ -106,6 +116,15 @@ func (m replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.appendLines(styleUser.Render("> " + line))
 			return m, replDispatchCmd(line, m.pendingApprovalID)
+		}
+	case tea.MouseMsg:
+		switch msg.Type {
+		case tea.MouseWheelUp:
+			m.scrollByLines(-replMouseScrollLines)
+			return m, nil
+		case tea.MouseWheelDown:
+			m.scrollByLines(replMouseScrollLines)
+			return m, nil
 		}
 	case replEventMsg:
 		m.applyEvent(msg.event)
@@ -127,6 +146,16 @@ func (m replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
+	if msg, ok := msg.(tea.KeyMsg); ok && msg.Alt {
+		if msg.Type == tea.KeyUp {
+			m.scrollByLines(-1)
+			return m, nil
+		}
+		if msg.Type == tea.KeyDown {
+			m.scrollByLines(1)
+			return m, nil
+		}
+	}
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
 }
@@ -182,9 +211,12 @@ func (m *replModel) appendLines(lines ...string) {
 		return
 	}
 	follow := m.viewport.AtBottom()
-	m.lines = append(m.lines, lines...)
-	if len(m.lines) > replMaxLogLines {
-		m.lines = m.lines[len(m.lines)-replMaxLogLines:]
+	m.lines = append(m.lines, sanitizeLines(lines)...)
+	if m.maxLogLines <= 0 {
+		m.maxLogLines = replMaxLogLinesDefault
+	}
+	if len(m.lines) > m.maxLogLines {
+		m.lines = m.lines[len(m.lines)-m.maxLogLines:]
 	}
 	m.viewport.SetContent(renderWrappedContent(m.lines, m.viewport.Width))
 	if follow {
@@ -215,7 +247,7 @@ func (m *replModel) resize(width, height int) {
 
 // statusLine 渲染底部状态栏。
 func (m replModel) statusLine() string {
-	parts := []string{"Ctrl+C 退出", "Enter 发送"}
+	parts := []string{"Ctrl+C 退出", "Enter 发送", "PgUp/PgDn 或滚轮滚动"}
 	if isAgentRunning() {
 		parts = append(parts, "agent 处理中")
 	}
@@ -239,10 +271,72 @@ func renderWrappedContent(lines []string, width int) string {
 	if len(lines) == 0 {
 		return ""
 	}
-	content := strings.Join(lines, "\n")
 	contentWidth := width - replViewportPad
 	if contentWidth < 1 {
-		return content
+		return strings.Join(lines, "\n")
 	}
-	return cellbuf.Wrap(content, contentWidth, "")
+	wrapped := make([]string, 0, len(lines))
+	for _, line := range lines {
+		wrapped = appendWrappedLines(wrapped, line, contentWidth)
+	}
+	return strings.Join(wrapped, "\n")
+}
+
+// scrollByLines 以指定行数滚动视口。
+func (m *replModel) scrollByLines(delta int) {
+	if delta == 0 {
+		return
+	}
+	if delta < 0 {
+		m.viewport.LineUp(-delta)
+		return
+	}
+	m.viewport.LineDown(delta)
+}
+
+// sanitizeLines 清理控制字符并拆分潜在的多行输入。
+func sanitizeLines(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		for _, part := range splitLines(line) {
+			out = append(out, sanitizeLine(part))
+		}
+	}
+	return out
+}
+
+// sanitizeLine 移除 \r 等控制字符，避免破坏 TUI 布局。
+func sanitizeLine(line string) string {
+	line = strings.ReplaceAll(line, "\r", "")
+	line = strings.ReplaceAll(line, "\t", "    ")
+	return strings.Map(func(r rune) rune {
+		if r == '\x1b' {
+			return r
+		}
+		if r < 32 {
+			return -1
+		}
+		return r
+	}, line)
+}
+
+// appendWrappedLines 对单行内容做软换行，并保留空行。
+func appendWrappedLines(dst []string, line string, width int) []string {
+	if line == "" {
+		return append(dst, "")
+	}
+	return append(dst, splitLines(cellbuf.Wrap(line, width, ""))...)
+}
+
+// resolveMaxLogLines 读取 TUI 最大日志行数配置。
+func resolveMaxLogLines() int {
+	raw := strings.TrimSpace(os.Getenv("CHASE_CODE_TUI_MAX_LINES"))
+	if raw == "" {
+		return replMaxLogLinesDefault
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return replMaxLogLinesDefault
+	}
+	return value
 }
