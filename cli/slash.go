@@ -7,23 +7,6 @@ import (
 	"chase-code/agent"
 )
 
-// handleSlashCommand 处理以 "/" 开头的命令，例如 /approvals。
-// 这些命令主要用于运行时调整会话配置等高阶操作。
-func handleSlashCommand(line string) ([]string, error) {
-	fields := strings.Fields(line)
-	if len(fields) == 0 {
-		return nil, nil
-	}
-
-	cmd := strings.TrimPrefix(fields[0], "/")
-	switch cmd {
-	case "approvals":
-		return handleApprovalsCommand(fields[1:])
-	default:
-		return nil, fmt.Errorf("未知 / 命令: %s", cmd)
-	}
-}
-
 // handleApprovalsCommand 实现 /approvals 命令：
 //   - /approvals           显示当前 apply_patch 审批模式；
 //   - /approvals auto      设置为自动模式；

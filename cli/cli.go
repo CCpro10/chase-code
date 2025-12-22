@@ -56,7 +56,7 @@ func usage() {
   %[1]s repl
 
 子命令说明:
-  (无子命令)          进入基于 LLM+工具的 agent repl，默认使用 :agent 处理输入。
+  (无子命令)          进入基于 LLM+工具的 agent repl，默认使用 /agent 处理输入。
   shell                使用当前用户默认 shell 执行命令，默认启用 login shell。
   repl                 进入交互式终端，在同一工作目录下多轮执行 agent/shell。
 

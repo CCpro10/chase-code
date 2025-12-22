@@ -160,15 +160,14 @@ func isAllowedWhileAgentRunning(line string) bool {
 	if strings.EqualFold(line, "y") || strings.EqualFold(line, "s") {
 		return true
 	}
-	if !strings.HasPrefix(line, ":") {
+	if !hasCommandPrefix(line) {
 		return false
 	}
-	fields := strings.Fields(line)
-	if len(fields) == 0 {
+	cmd := parseReplCommand(line)
+	if cmd.name == "" {
 		return true
 	}
-	cmd := strings.TrimPrefix(fields[0], ":")
-	switch cmd {
+	switch cmd.name {
 	case "approve", "reject", "y", "s", "q", "quit", "exit", "help":
 		return true
 	default:
@@ -195,11 +194,7 @@ func dispatchReplInput(line string, pendingApprovalID string) (replDispatchResul
 		return replDispatchResult{}, fmt.Errorf("当前有任务在执行，请先处理审批或等待完成")
 	}
 
-	if strings.HasPrefix(line, "/") {
-		lines, err := handleSlashCommand(line)
-		return replDispatchResult{lines: lines}, err
-	}
-	if strings.HasPrefix(line, ":") {
+	if hasCommandPrefix(line) {
 		return handleReplCommand(line, pendingApprovalID)
 	}
 	return replDispatchResult{}, startAgentTurn(line)
@@ -226,7 +221,7 @@ func isApprovalShortcut(line string) bool {
 	return strings.EqualFold(line, "y") || strings.EqualFold(line, "s")
 }
 
-// handleReplCommand 解析 : 开头的命令并生成输出。
+// handleReplCommand 解析 / 开头的命令并生成输出。
 func handleReplCommand(line string, pendingApprovalID string) (replDispatchResult, error) {
 	cmd := parseReplCommand(line)
 	if cmd.name == "" {
@@ -242,7 +237,10 @@ func handleReplCommand(line string, pendingApprovalID string) (replDispatchResul
 		lines, err := handleShellCommand(cmd.args)
 		return replDispatchResult{lines: lines}, err
 	case "agent":
-		return replDispatchResult{}, handleAgentCommand(line)
+		return replDispatchResult{}, handleAgentCommand(cmd.args)
+	case "approvals":
+		lines, err := handleApprovalsCommand(cmd.args)
+		return replDispatchResult{lines: lines}, err
 	case "approve":
 		lines, err := handleApprovalCommand(cmd.args, true)
 		return replDispatchResult{lines: lines}, err
@@ -262,22 +260,22 @@ type replCommand struct {
 	args []string
 }
 
-// parseReplCommand 解析 : 开头的 repl 命令。
+// parseReplCommand 解析 / 开头的 repl 命令。
 func parseReplCommand(line string) replCommand {
 	fields := strings.Fields(line)
 	if len(fields) == 0 {
 		return replCommand{}
 	}
 	return replCommand{
-		name: strings.TrimPrefix(fields[0], ":"),
+		name: normalizeCommandName(fields[0]),
 		args: fields[1:],
 	}
 }
 
-// handleShellCommand 处理 :shell 命令。
+// handleShellCommand 处理 /shell 命令。
 func handleShellCommand(args []string) ([]string, error) {
 	if len(args) == 0 {
-		return nil, fmt.Errorf("用法: :shell <命令>")
+		return nil, fmt.Errorf("用法: /shell <命令>")
 	}
 	result, err := executeShellCommand([]string{"--", strings.Join(args, " ")})
 	if result == nil {
@@ -286,22 +284,22 @@ func handleShellCommand(args []string) ([]string, error) {
 	return formatShellResult(result), err
 }
 
-// handleAgentCommand 处理 :agent 命令。
-func handleAgentCommand(line string) error {
-	rest := strings.TrimSpace(strings.TrimPrefix(line, ":agent"))
+// handleAgentCommand 处理 /agent 命令。
+func handleAgentCommand(args []string) error {
+	rest := strings.TrimSpace(strings.Join(args, " "))
 	if rest == "" {
-		return fmt.Errorf("用法: :agent <任务描述>")
+		return fmt.Errorf("用法: /agent <任务描述>")
 	}
 	return startAgentTurn(rest)
 }
 
-// handleApprovalCommand 处理 :approve/:reject 命令。
+// handleApprovalCommand 处理 /approve、/reject 命令。
 func handleApprovalCommand(args []string, approved bool) ([]string, error) {
 	if len(args) != 1 {
 		if approved {
-			return nil, fmt.Errorf("用法: :approve <请求ID>")
+			return nil, fmt.Errorf("用法: /approve <请求ID>")
 		}
-		return nil, fmt.Errorf("用法: :reject <请求ID>")
+		return nil, fmt.Errorf("用法: /reject <请求ID>")
 	}
 	msg, err := sendApproval(args[0], approved)
 	if err != nil {
@@ -310,7 +308,7 @@ func handleApprovalCommand(args []string, approved bool) ([]string, error) {
 	return []string{msg}, nil
 }
 
-// handleApprovalShortcutCommand 处理 :y/:s 命令。
+// handleApprovalShortcutCommand 处理 /y、/s 命令。
 func handleApprovalShortcutCommand(cmd string, pendingApprovalID string) ([]string, error) {
 	if pendingApprovalID == "" {
 		return nil, fmt.Errorf("当前没有待审批请求")
@@ -367,16 +365,27 @@ func emitAgentTurnError(sess *replAgentSession, err error) {
 	})
 }
 
+// hasCommandPrefix 判断输入是否以命令前缀开头。
+func hasCommandPrefix(line string) bool {
+	return strings.HasPrefix(line, "/")
+}
+
+// normalizeCommandName 去除命令前缀并返回规范化名称。
+func normalizeCommandName(raw string) string {
+	return strings.TrimPrefix(raw, "/")
+}
+
 // replHelpLines 返回 REPL 帮助信息。
 func replHelpLines() []string {
 	return []string{`可用命令:
-  :help                显示帮助
-  :q / :quit / :exit   退出 repl
-  :shell <cmd>         通过用户默认 shell 执行命令
-  :agent <指令>        通过 LLM+工具自动完成一步任务
-  :approve <id>        批准指定补丁请求（来自 apply_patch）
-  :reject <id>         拒绝指定补丁请求
+  /help                显示帮助
+  /q / /quit / /exit   退出 repl
+  /shell <cmd>         通过用户默认 shell 执行命令
+  /agent <指令>        通过 LLM+工具自动完成一步任务
+  /approve <id>        批准指定补丁请求（来自 apply_patch）
+  /reject <id>         拒绝指定补丁请求
+  /approvals           查看/设置 apply_patch 审批模式
 
 默认行为:
-  直接输入不以冒号开头的内容时，等价于 :agent <输入行>。`}
+  直接输入不以 / 开头的内容时，等价于 /agent <输入行>。`}
 }

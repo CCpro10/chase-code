@@ -17,11 +17,12 @@ import (
 
 const (
 	replMaxLogLinesDefault = 8000
-	replInputHeight        = 1
+	replInputHeight        = 3
 	replStatusHeight       = 1
 	replScrollLines        = 6
 	replMouseScrollLines   = 3
 	replViewportPad        = 1
+	inputBoxPadding        = 1
 )
 
 // replModel 负责管理 TUI 的状态与渲染。
@@ -176,7 +177,7 @@ func (m replModel) View() string {
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
 		m.viewport.View(),
-		m.input.View(),
+		m.inputBoxView(),
 		m.statusLine(),
 	)
 }
@@ -238,8 +239,9 @@ func (m *replModel) resize(width, height int) {
 	m.width = width
 	m.height = height
 	m.viewport.Width = width
+	contentWidth := inputBoxContentWidth(width)
 	promptWidth := lipgloss.Width(m.input.Prompt)
-	inputWidth := width - promptWidth - 1
+	inputWidth := contentWidth - promptWidth - 1
 	if inputWidth < 0 {
 		inputWidth = 0
 	}
@@ -268,13 +270,63 @@ func (m replModel) statusLine() string {
 	return styleStatus.Render(strings.Join(parts, " | "))
 }
 
+// inputBoxView 将输入框包裹成带边框的视图。
+func (m replModel) inputBoxView() string {
+	view := m.input.View()
+	if m.width <= 0 {
+		return view
+	}
+	style := styleInputBox
+	if m.input.Focused() {
+		style = styleInputOn
+	}
+	return style.Width(m.width).Render(view)
+}
+
 // replBannerLines 返回启动提示。
 func replBannerLines() []string {
 	cwd, _ := os.Getwd()
-	return []string{
-		styleDim.Render(fmt.Sprintf("chase-code repl（agent 优先），当前工作目录: %s", cwd)),
-		styleDim.Render("直接输入问题或指令时，将通过 LLM+工具以 agent 方式执行；输入 :help 查看可用命令，:q 退出。"),
+	logo := []string{
+		"  ____ _                      ____          _      ",
+		" / ___| |__   __ _ ___  ___  / ___|___   __| | ___ ",
+		"| |   | '_ \\ / _` / __|/ _ \\| |   / _ \\ / _` |/ _ \\",
+		"| |___| | | | (_| \\__ \\  __/| |__| (_) | (_| |  __/",
+		" \\____|_| |_|\\__,_|___/\\___| \\____\\___/ \\__,_|\\___|",
 	}
+
+	lines := make([]string, 0, len(logo)+6)
+	for i, line := range logo {
+		if i%2 == 0 {
+			lines = append(lines, styleBanner.Render(line))
+		} else {
+			lines = append(lines, styleBannerA.Render(line))
+		}
+	}
+	lines = append(lines, "")
+	lines = append(lines, styleDim.Render(fmt.Sprintf("chase-code repl（agent 优先），当前工作目录: %s", cwd)))
+	lines = append(lines, replGuideBox())
+	lines = append(lines, styleDim.Render("输入 /help 查看可用命令，/q 退出。"))
+	return lines
+}
+
+// replGuideBox 返回启动提示信息的盒子渲染。
+func replGuideBox() string {
+	tips := []string{
+		styleGuideHead.Render("Quick start"),
+		"1) 直接输入问题或指令，agent 会自动调用工具。",
+		"2) 使用 @path 引用文件，/help 查看命令列表。",
+		"3) /q 退出，y/s 或 /approve / /reject 处理审批。",
+	}
+	return styleGuideBox.Render(strings.Join(tips, "\n"))
+}
+
+// inputBoxContentWidth 计算输入框可用于文本的实际宽度。
+func inputBoxContentWidth(totalWidth int) int {
+	content := totalWidth - 2 - inputBoxPadding*2
+	if content < 0 {
+		return 0
+	}
+	return content
 }
 
 // renderWrappedContent 对日志内容做软换行，避免窗口缩窄后内容溢出。

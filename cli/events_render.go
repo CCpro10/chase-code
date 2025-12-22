@@ -111,7 +111,7 @@ func formatPatchApprovalRequest(ev server.Event) []string {
 	if strings.TrimSpace(ev.Message) != "" {
 		lines = append(lines, fmt.Sprintf("  原因: %s", ev.Message))
 	}
-	lines = append(lines, styleDim.Render(fmt.Sprintf("  直接输入 y 批准，s 跳过；或使用 :approve %s / :reject %s。", ev.RequestID, ev.RequestID)))
+	lines = append(lines, styleDim.Render(fmt.Sprintf("  直接输入 y 批准，s 跳过；或使用 /approve %s / /reject %s。", ev.RequestID, ev.RequestID)))
 	return lines
 }
 
