@@ -3,40 +3,27 @@ package cli
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/cellbuf"
 
 	"chase-code/server"
 )
 
 const (
-	replMaxLogLinesDefault = 8000
-	replInputHeight        = 3
-	replStatusHeight       = 1
-	replScrollLines        = 6
-	replMouseScrollLines   = 3
-	replViewportPad        = 1
-	inputBoxPadding        = 1
+	inputBoxPadding = 1
 )
 
 // replModel 负责管理 TUI 的状态与渲染。
 type replModel struct {
 	input             textinput.Model
-	viewport          viewport.Model
-	lines             []string
 	events            <-chan server.Event
 	pendingApprovalID string
-	ready             bool
+	exiting           bool
 	width             int
 	height            int
-	maxLogLines       int
-	mouseEnabled      bool
 }
 
 type replEventMsg struct {
@@ -50,22 +37,18 @@ type replDispatchMsg struct {
 	err    error
 }
 
-// runReplTUI 启动基于 Bubble Tea 的交互终端。
+// runReplTUI 启动基于 Bubble Tea 的交互终端（仅保留输入框渲染）。
 func runReplTUI(events <-chan server.Event) error {
 	if events == nil {
 		return fmt.Errorf("事件通道未初始化")
 	}
 	model := newReplModel(events)
-	options := []tea.ProgramOption{tea.WithAltScreen()}
-	if model.mouseEnabled {
-		options = append(options, tea.WithMouseAllMotion())
-	}
-	program := tea.NewProgram(model, options...)
+	program := tea.NewProgram(model)
 	_, err := program.Run()
 	return err
 }
 
-// newReplModel 构造 TUI 模型并写入启动提示。
+// newReplModel 构造 TUI 模型。
 func newReplModel(events <-chan server.Event) replModel {
 	input := textinput.New()
 	input.Prompt = "chase> "
@@ -74,23 +57,19 @@ func newReplModel(events <-chan server.Event) replModel {
 	input.CursorStyle = styleInput
 	input.Focus()
 
-	vp := viewport.New(0, 0)
-	vp.Style = lipgloss.NewStyle().PaddingLeft(replViewportPad)
-
-	model := replModel{
-		input:        input,
-		viewport:     vp,
-		events:       events,
-		maxLogLines:  resolveMaxLogLines(),
-		mouseEnabled: resolveMouseEnabled(),
+	return replModel{
+		input:  input,
+		events: events,
 	}
-	model.appendLines(replBannerLines()...)
-	return model
 }
 
-// Init 启动事件监听与光标闪烁。
+// Init 启动事件监听、光标闪烁，并输出启动提示。
 func (m replModel) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, listenForReplEvent(m.events))
+	return tea.Batch(
+		textinput.Blink,
+		listenForReplEvent(m.events),
+		printReplLinesCmd(replBannerLines()),
+	)
 }
 
 // Update 处理输入、事件与窗口尺寸变化。
@@ -102,84 +81,68 @@ func (m replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyCtrlD:
+			m.exiting = true
 			return m, tea.Quit
-		case tea.KeyPgUp:
-			m.scrollByLines(-replScrollLines)
-			return m, nil
-		case tea.KeyPgDown:
-			m.scrollByLines(replScrollLines)
-			return m, nil
-		case tea.KeyHome:
-			m.viewport.GotoTop()
-			return m, nil
-		case tea.KeyEnd:
-			m.viewport.GotoBottom()
-			return m, nil
 		case tea.KeyEnter:
-			line := strings.TrimSpace(m.input.Value())
-			m.input.SetValue("")
-			if line == "" {
-				return m, nil
-			}
-			m.appendLines(styleUser.Render("> " + line))
-			return m, replDispatchCmd(line, m.pendingApprovalID)
-		}
-	case tea.MouseMsg:
-		if m.mouseEnabled {
-			switch msg.Type {
-			case tea.MouseWheelUp:
-				m.scrollByLines(-replMouseScrollLines)
-				return m, nil
-			case tea.MouseWheelDown:
-				m.scrollByLines(replMouseScrollLines)
-				return m, nil
-			}
+			return m.handleEnter()
 		}
 	case replEventMsg:
-		m.applyEvent(msg.event)
-		return m, listenForReplEvent(m.events)
+		lines := m.applyEvent(msg.event)
+		return m, tea.Batch(
+			listenForReplEvent(m.events),
+			printReplLinesCmd(lines),
+		)
 	case replEventClosedMsg:
-		m.appendLines(styleDim.Render("[event] 通道已关闭"))
-		return m, nil
+		return m, printReplLinesCmd([]string{styleDim.Render("[event] 通道已关闭")})
 	case replDispatchMsg:
-		if msg.err != nil {
-			m.appendLines(styleError.Render("错误: " + msg.err.Error()))
-		}
-		if len(msg.result.lines) > 0 {
-			m.appendLines(msg.result.lines...)
-		}
-		if msg.result.quit {
-			return m, tea.Quit
-		}
-		return m, nil
+		return m.handleDispatch(msg)
 	}
 
 	var cmd tea.Cmd
-	if msg, ok := msg.(tea.KeyMsg); ok && msg.Alt {
-		if msg.Type == tea.KeyUp {
-			m.scrollByLines(-1)
-			return m, nil
-		}
-		if msg.Type == tea.KeyDown {
-			m.scrollByLines(1)
-			return m, nil
-		}
-	}
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
 }
 
-// View 渲染 TUI 界面。
+// View 渲染输入框组件。
 func (m replModel) View() string {
-	if !m.ready {
-		return "loading..."
+	if m.exiting {
+		return ""
 	}
-	return lipgloss.JoinVertical(
-		lipgloss.Left,
-		m.viewport.View(),
-		m.inputBoxView(),
-		m.statusLine(),
+	return m.inputBoxView()
+}
+
+// handleEnter 处理回车输入并触发异步分发。
+func (m replModel) handleEnter() (tea.Model, tea.Cmd) {
+	line := strings.TrimSpace(m.input.Value())
+	m.input.SetValue("")
+	if line == "" {
+		return m, nil
+	}
+	echo := []string{styleUser.Render("> " + line)}
+	return m, tea.Batch(
+		printReplLinesCmd(echo),
+		replDispatchCmd(line, m.pendingApprovalID),
 	)
+}
+
+// handleDispatch 处理命令执行结果并决定是否退出。
+func (m replModel) handleDispatch(msg replDispatchMsg) (tea.Model, tea.Cmd) {
+	lines := make([]string, 0, len(msg.result.lines)+1)
+	if msg.err != nil {
+		lines = append(lines, styleError.Render("错误: "+msg.err.Error()))
+	}
+	if len(msg.result.lines) > 0 {
+		lines = append(lines, msg.result.lines...)
+	}
+	cmd := printReplLinesCmd(lines)
+	if msg.result.quit {
+		m.exiting = true
+		if cmd == nil {
+			return m, tea.Quit
+		}
+		return m, tea.Sequence(cmd, tea.Quit)
+	}
+	return m, cmd
 }
 
 // listenForReplEvent 等待下一条事件。
@@ -201,44 +164,30 @@ func replDispatchCmd(line string, pendingApprovalID string) tea.Cmd {
 	}
 }
 
-// applyEvent 将事件写入日志并更新审批状态。
-func (m *replModel) applyEvent(ev server.Event) {
+// printReplLinesCmd 将输出写入终端滚动区，而不是渲染在 TUI 视口内。
+func printReplLinesCmd(lines []string) tea.Cmd {
+	if len(lines) == 0 {
+		return nil
+	}
+	text := strings.Join(sanitizeLines(lines), "\n")
+	return tea.Printf("%s\n", text)
+}
+
+// applyEvent 将事件写入终端输出并更新审批状态。
+func (m *replModel) applyEvent(ev server.Event) []string {
 	if ev.Kind == server.EventPatchApprovalRequest {
 		m.pendingApprovalID = ev.RequestID
 	}
 	if ev.Kind == server.EventPatchApprovalResult && ev.RequestID == m.pendingApprovalID {
 		m.pendingApprovalID = ""
 	}
-	if lines := formatEvent(ev); len(lines) > 0 {
-		m.appendLines(lines...)
-	}
+	return formatEvent(ev)
 }
 
-// appendLines 追加日志并控制滚动位置。
-func (m *replModel) appendLines(lines ...string) {
-	if len(lines) == 0 {
-		return
-	}
-	follow := m.viewport.AtBottom()
-	m.lines = append(m.lines, sanitizeLines(lines)...)
-	if m.maxLogLines <= 0 {
-		m.maxLogLines = replMaxLogLinesDefault
-	}
-	if len(m.lines) > m.maxLogLines {
-		m.lines = m.lines[len(m.lines)-m.maxLogLines:]
-	}
-	m.viewport.SetContent(renderWrappedContent(m.lines, m.viewport.Width))
-	if follow {
-		m.viewport.GotoBottom()
-	}
-}
-
-// resize 调整视口尺寸。
+// resize 根据窗口尺寸调整输入框宽度。
 func (m *replModel) resize(width, height int) {
-	m.ready = true
 	m.width = width
 	m.height = height
-	m.viewport.Width = width
 	contentWidth := inputBoxContentWidth(width)
 	promptWidth := lipgloss.Width(m.input.Prompt)
 	inputWidth := contentWidth - promptWidth - 1
@@ -246,28 +195,6 @@ func (m *replModel) resize(width, height int) {
 		inputWidth = 0
 	}
 	m.input.Width = inputWidth
-	viewportHeight := height - replInputHeight - replStatusHeight
-	if viewportHeight < 1 {
-		viewportHeight = 1
-	}
-	m.viewport.Height = viewportHeight
-	m.viewport.SetContent(renderWrappedContent(m.lines, m.viewport.Width))
-	m.viewport.GotoBottom()
-}
-
-// statusLine 渲染底部状态栏。
-func (m replModel) statusLine() string {
-	parts := []string{"Ctrl+C 退出", "Enter 发送", "PgUp/PgDn 滚动"}
-	if m.mouseEnabled {
-		parts = append(parts, "滚轮滚动")
-	}
-	if isAgentRunning() {
-		parts = append(parts, "agent 处理中")
-	}
-	if m.pendingApprovalID != "" {
-		parts = append(parts, fmt.Sprintf("待审批: %s (y/s)", m.pendingApprovalID))
-	}
-	return styleStatus.Render(strings.Join(parts, " | "))
 }
 
 // inputBoxView 将输入框包裹成带边框的视图。
@@ -329,34 +256,6 @@ func inputBoxContentWidth(totalWidth int) int {
 	return content
 }
 
-// renderWrappedContent 对日志内容做软换行，避免窗口缩窄后内容溢出。
-func renderWrappedContent(lines []string, width int) string {
-	if len(lines) == 0 {
-		return ""
-	}
-	contentWidth := width - replViewportPad
-	if contentWidth < 1 {
-		return strings.Join(lines, "\n")
-	}
-	wrapped := make([]string, 0, len(lines))
-	for _, line := range lines {
-		wrapped = appendWrappedLines(wrapped, line, contentWidth)
-	}
-	return strings.Join(wrapped, "\n")
-}
-
-// scrollByLines 以指定行数滚动视口。
-func (m *replModel) scrollByLines(delta int) {
-	if delta == 0 {
-		return
-	}
-	if delta < 0 {
-		m.viewport.LineUp(-delta)
-		return
-	}
-	m.viewport.LineDown(delta)
-}
-
 // sanitizeLines 清理控制字符并拆分潜在的多行输入。
 func sanitizeLines(lines []string) []string {
 	out := make([]string, 0, len(lines))
@@ -368,7 +267,7 @@ func sanitizeLines(lines []string) []string {
 	return out
 }
 
-// sanitizeLine 移除 \r 等控制字符，避免破坏 TUI 布局。
+// sanitizeLine 移除 \r 等控制字符，避免破坏终端输出。
 func sanitizeLine(line string) string {
 	line = strings.ReplaceAll(line, "\r", "")
 	line = strings.ReplaceAll(line, "\t", "    ")
@@ -381,39 +280,4 @@ func sanitizeLine(line string) string {
 		}
 		return r
 	}, line)
-}
-
-// appendWrappedLines 对单行内容做软换行，并保留空行。
-func appendWrappedLines(dst []string, line string, width int) []string {
-	if line == "" {
-		return append(dst, "")
-	}
-	return append(dst, splitLines(cellbuf.Wrap(line, width, ""))...)
-}
-
-// resolveMaxLogLines 读取 TUI 最大日志行数配置。
-func resolveMaxLogLines() int {
-	raw := strings.TrimSpace(os.Getenv("CHASE_CODE_TUI_MAX_LINES"))
-	if raw == "" {
-		return replMaxLogLinesDefault
-	}
-	value, err := strconv.Atoi(raw)
-	if err != nil || value <= 0 {
-		return replMaxLogLinesDefault
-	}
-	return value
-}
-
-// resolveMouseEnabled 读取鼠标事件开关，避免影响终端文本选择。
-func resolveMouseEnabled() bool {
-	raw := strings.TrimSpace(os.Getenv("CHASE_CODE_TUI_MOUSE"))
-	if raw == "" {
-		return false
-	}
-	switch strings.ToLower(raw) {
-	case "1", "true", "yes", "y", "on":
-		return true
-	default:
-		return false
-	}
 }
