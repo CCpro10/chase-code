@@ -12,8 +12,9 @@ func ReadFileLimited(path string, maxBytes int) ([]byte, error) {
 		return nil, fmt.Errorf("读取文件失败: %w", err)
 	}
 	if maxBytes > 0 && len(data) > maxBytes {
-		fmt.Fprintf(os.Stderr, "警告: 文件过大，仅输出前 %d 字节\n", maxBytes)
+		str := fmt.Sprintf("警告: 文件过大，仅输出前 %d 字节\n", maxBytes)
 		data = data[:maxBytes]
+		data = append(data, []byte(str)...)
 	}
 	return data, nil
 }
