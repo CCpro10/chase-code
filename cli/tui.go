@@ -18,12 +18,15 @@ const (
 
 // replModel 负责管理 TUI 的状态与渲染。
 type replModel struct {
-	input             textinput.Model
-	events            <-chan server.Event
-	pendingApprovalID string
-	exiting           bool
-	width             int
-	height            int
+	input               textinput.Model
+	events              <-chan server.Event
+	pendingApprovalID   string
+	exiting             bool
+	width               int
+	height              int
+	streamBuffer        string
+	streamActive        bool
+	streamHeaderPrinted bool
 }
 
 type replEventMsg struct {
@@ -171,7 +174,7 @@ func printReplLinesCmd(lines []string) tea.Cmd {
 		return nil
 	}
 	text := strings.Join(clean, "\n")
-	return tea.Printf("%s\n", text)
+	return tea.Printf("%s", text)
 }
 
 // applyEvent 将事件写入终端输出并更新审批状态。
@@ -182,7 +185,73 @@ func (m *replModel) applyEvent(ev server.Event) []string {
 	if ev.Kind == server.EventPatchApprovalResult && ev.RequestID == m.pendingApprovalID {
 		m.pendingApprovalID = ""
 	}
+
+	switch ev.Kind {
+	case server.EventAgentTextDelta:
+		return m.appendStreamDelta(ev.Message)
+	case server.EventAgentTextDone:
+		if m.streamActive {
+			lines := m.flushStreamBuffer()
+			m.resetStreamState()
+			return lines
+		}
+		return formatEvent(ev)
+	case server.EventToolPlanned, server.EventTurnError, server.EventTurnFinished:
+		m.resetStreamState()
+	}
+
 	return formatEvent(ev)
+}
+
+// appendStreamDelta 追加流式增量并尽量输出完整行。
+func (m *replModel) appendStreamDelta(delta string) []string {
+	if delta == "" {
+		return nil
+	}
+	m.streamActive = true
+	m.streamBuffer += delta
+	return m.consumeStreamLines()
+}
+
+// consumeStreamLines 从缓冲区中提取完整行并保留尾部半行。
+func (m *replModel) consumeStreamLines() []string {
+	lastBreak := strings.LastIndex(m.streamBuffer, "\n")
+	if lastBreak == -1 {
+		return nil
+	}
+	chunk := m.streamBuffer[:lastBreak]
+	m.streamBuffer = m.streamBuffer[lastBreak+1:]
+	return m.decorateStreamLines(splitLines(chunk))
+}
+
+// flushStreamBuffer 在结束时输出缓冲区剩余内容。
+func (m *replModel) flushStreamBuffer() []string {
+	if !m.streamActive {
+		return nil
+	}
+	lines := m.decorateStreamLines(splitLines(m.streamBuffer))
+	m.streamBuffer = ""
+	return lines
+}
+
+// decorateStreamLines 为流式输出添加头部提示。
+func (m *replModel) decorateStreamLines(lines []string) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+	if !m.streamHeaderPrinted {
+		m.streamHeaderPrinted = true
+		header := styleCyan.Render("[agent] 正在生成：")
+		lines = append([]string{header}, lines...)
+	}
+	return lines
+}
+
+// resetStreamState 清理流式输出状态，避免跨事件残留。
+func (m *replModel) resetStreamState() {
+	m.streamBuffer = ""
+	m.streamActive = false
+	m.streamHeaderPrinted = false
 }
 
 // resize 根据窗口尺寸调整输入框宽度。

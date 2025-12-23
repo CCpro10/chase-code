@@ -186,14 +186,43 @@ func (s *Session) callLLM(baseCtx context.Context, prompt server.Prompt, step in
 	log.Printf("[agent] step=%d calling LLM (history_items=%d, prompt_msgs=%d)", step, len(prompt.Items), len(prompt.Messages))
 
 	// 为本次 LLM 调用单独设置超时，避免影响后续工具执行/审批流程。
-	llmCtx, cancelLLM := context.WithTimeout(baseCtx, 60*time.Second)
-	res, err := s.Client.Complete(llmCtx, prompt)
-	cancelLLM()
-	if err != nil {
-		log.Printf("[agent] step=%d LLM error: %v", step, err)
-		return nil, err
+	llmCtx, cancelLLM := context.WithTimeout(baseCtx, 120*time.Second) // 增加超时以适应流式传输
+	defer cancelLLM()
+
+	stream := s.Client.Stream(llmCtx, prompt)
+
+	var lastError error
+	var finalResult *server.LLMResult
+
+	for ev := range stream.C {
+		switch ev.Kind {
+		case server.LLMEventTextDelta:
+			// 仅当 delta 不为空时才发送，避免不必要的 UI 刷新
+			if ev.TextDelta != "" {
+				s.Sink.SendEvent(server.Event{
+					Kind:    server.EventAgentTextDelta,
+					Time:    time.Now(),
+					Step:    step,
+					Message: ev.TextDelta,
+				})
+			}
+		case server.LLMEventError:
+			lastError = ev.Error
+		case server.LLMEventCompleted:
+			finalResult = ev.Result
+		}
 	}
-	return res, nil
+
+	if lastError != nil {
+		log.Printf("[agent] step=%d LLM error: %v", step, lastError)
+		return nil, lastError
+	}
+
+	if finalResult == nil {
+		return nil, fmt.Errorf("LLM stream completed without result")
+	}
+
+	return finalResult, nil
 }
 
 // logLLMReply 输出 LLM 回复摘要日志。

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -35,6 +37,7 @@ type LLMEvent struct {
 	TextDelta string
 	FullText  string
 	Error     error
+	Result    *LLMResult
 }
 
 type LLMStream struct {
@@ -572,23 +575,182 @@ func extractToolCalls(msg openAIChatResponseMessage) []ToolCall {
 	return toolCalls
 }
 
-// Stream 以流式接口返回一次完整的响应，便于与现有调用方保持兼容。
+// Stream 以流式接口返回响应。
 func (c *OpenAIClient) Stream(ctx context.Context, p Prompt) *LLMStream {
-	ch := make(chan LLMEvent, 8)
+	ch := make(chan LLMEvent, 128)
 	stream := &LLMStream{C: ch}
 
 	go func() {
 		defer close(ch)
-		res, err := c.Complete(ctx, p)
+
+		url := c.chatCompletionsURL()
+		reqBody := c.buildChatRequest(p)
+		reqBody.Stream = true
+
+		data, pretty, err := marshalRequestBody(reqBody)
 		if err != nil {
 			stream.Err = err
 			ch <- LLMEvent{Kind: LLMEventError, Error: err}
 			return
 		}
+		logRequest(c.cfg, url, data, pretty)
+
+		start := time.Now()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+		if err != nil {
+			stream.Err = err
+			ch <- LLMEvent{Kind: LLMEventError, Error: err}
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "text/event-stream")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			log.Printf("[llm] http error: %v (elapsed=%s)", err, time.Since(start))
+			stream.Err = err
+			ch <- LLMEvent{Kind: LLMEventError, Error: err}
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode/100 != 2 {
+			body, _ := io.ReadAll(resp.Body)
+			log.Printf("[llm] non-2xx status=%d body=%s", resp.StatusCode, string(body))
+			err := fmt.Errorf("OpenAI API error: %d %s", resp.StatusCode, string(body))
+			stream.Err = err
+			ch <- LLMEvent{Kind: LLMEventError, Error: err}
+			return
+		}
+
 		ch <- LLMEvent{Kind: LLMEventCreated}
-		ch <- LLMEvent{Kind: LLMEventTextDelta, TextDelta: res.Message.Content}
-		ch <- LLMEvent{Kind: LLMEventCompleted, FullText: res.Message.Content}
+
+		scanner := bufio.NewScanner(resp.Body)
+		var fullTextBuilder strings.Builder
+
+		// toolCallsMap 用于收集流式的 tool calls: index -> *openAIToolCall
+		toolCallsMap := make(map[int]*openAIToolCall)
+
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" {
+				continue
+			}
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			payload := strings.TrimPrefix(line, "data: ")
+			if payload == "[DONE]" {
+				break
+			}
+
+			var streamResp openAIChatStreamResponse
+			if err := json.Unmarshal([]byte(payload), &streamResp); err != nil {
+				log.Printf("[llm] decode stream error: %v payload=%s", err, payload)
+				continue
+			}
+
+			if len(streamResp.Choices) > 0 {
+				delta := streamResp.Choices[0].Delta
+
+				// 1. 处理文本内容
+				if delta.Content != "" {
+					fullTextBuilder.WriteString(delta.Content)
+					ch <- LLMEvent{Kind: LLMEventTextDelta, TextDelta: delta.Content}
+				}
+
+				// 2. 处理 Tool Calls
+				for _, tc := range delta.ToolCalls {
+					idx := tc.Index
+					if _, ok := toolCallsMap[idx]; !ok {
+						toolCallsMap[idx] = &openAIToolCall{}
+					}
+					target := toolCallsMap[idx]
+
+					if tc.ID != "" {
+						target.ID = tc.ID
+					}
+					if tc.Type != "" {
+						target.Type = tc.Type
+					}
+					if tc.Function.Name != "" {
+						target.Function.Name += tc.Function.Name
+					}
+					if tc.Function.Arguments != "" {
+						target.Function.Arguments += tc.Function.Arguments
+					}
+				}
+			}
+		}
+
+		if err := scanner.Err(); err != nil {
+			log.Printf("[llm] stream scan error: %v", err)
+			stream.Err = err
+			ch <- LLMEvent{Kind: LLMEventError, Error: err}
+			return
+		}
+
+		fullText := fullTextBuilder.String()
+
+		// 构造最终结果
+		finalResult := &LLMResult{
+			Message: LLMMessage{
+				Role:    RoleAssistant,
+				Content: fullText,
+			},
+		}
+
+		// 转换 tool calls
+		if len(toolCallsMap) > 0 {
+			// 按索引排序
+			var indices []int
+			for k := range toolCallsMap {
+				indices = append(indices, k)
+			}
+			sort.Ints(indices)
+
+			var finalToolCalls []ToolCall
+			for _, idx := range indices {
+				tc := toolCallsMap[idx]
+				finalToolCalls = append(finalToolCalls, ToolCall{
+					ToolName:  tc.Function.Name,
+					Arguments: json.RawMessage(tc.Function.Arguments),
+					CallID:    tc.ID,
+				})
+			}
+			finalResult.ToolCalls = finalToolCalls
+		}
+
+		log.Printf("[llm] stream complete elapsed=%s len=%d tool_calls=%d", time.Since(start), len(fullText), len(finalResult.ToolCalls))
+		ch <- LLMEvent{Kind: LLMEventCompleted, FullText: fullText, Result: finalResult}
 	}()
 
 	return stream
+}
+
+type openAIChatStreamResponse struct {
+	Choices []openAIChatStreamChoice `json:"choices"`
+}
+
+type openAIChatStreamChoice struct {
+	Delta openAIChatStreamDelta `json:"delta"`
+}
+
+type openAIChatStreamDelta struct {
+	Role      string                     `json:"role"`
+	Content   string                     `json:"content"`
+	ToolCalls []openAIChatStreamToolCall `json:"tool_calls,omitempty"`
+}
+
+type openAIChatStreamToolCall struct {
+	Index    int                      `json:"index"`
+	ID       string                   `json:"id"`
+	Type     string                   `json:"type"`
+	Function openAIChatStreamFunction `json:"function"`
+}
+
+type openAIChatStreamFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
