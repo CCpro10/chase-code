@@ -11,7 +11,7 @@ var (
 	styleGreen     = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	styleMagenta   = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
 	styleError     = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	stylePrompt    = lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true).Background(lipgloss.Color("235"))
+	stylePrompt    = lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true)
 	styleInput     = lipgloss.NewStyle().Foreground(lipgloss.Color("7")).Background(lipgloss.Color("235"))
 	styleStatus    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	styleUser      = lipgloss.NewStyle().Foreground(lipgloss.Color("7")).Bold(true)
