@@ -27,6 +27,11 @@ type replModel struct {
 	streamBuffer        string
 	streamActive        bool
 	streamHeaderPrinted bool
+
+	// 补全列表相关
+	showSuggestions bool
+	suggestions     []CLICommand
+	suggestionIdx   int
 }
 
 type replEventMsg struct {
@@ -82,6 +87,34 @@ func (m replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resize(msg.Width, msg.Height)
 		return m, nil
 	case tea.KeyMsg:
+		if m.showSuggestions {
+			switch msg.Type {
+			case tea.KeyUp:
+				m.suggestionIdx--
+				if m.suggestionIdx < 0 {
+					m.suggestionIdx = len(m.suggestions) - 1
+				}
+				return m, nil
+			case tea.KeyDown, tea.KeyTab:
+				m.suggestionIdx++
+				if m.suggestionIdx >= len(m.suggestions) {
+					m.suggestionIdx = 0
+				}
+				return m, nil
+			case tea.KeyEnter:
+				if len(m.suggestions) > 0 {
+					cmd := m.suggestions[m.suggestionIdx]
+					m.input.SetValue("/" + cmd.Name() + " ")
+					m.input.CursorEnd()
+					m.showSuggestions = false
+					return m, nil
+				}
+			case tea.KeyEsc:
+				m.showSuggestions = false
+				return m, nil
+			}
+		}
+
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyCtrlD:
 			m.exiting = true
@@ -103,7 +136,64 @@ func (m replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	m.updateSuggestions()
 	return m, cmd
+}
+
+// updateSuggestions 根据当前输入更新补全列表。
+func (m *replModel) updateSuggestions() {
+	val := m.input.Value()
+	if !strings.HasPrefix(val, "/") || strings.Contains(val, " ") {
+		m.showSuggestions = false
+		m.suggestions = nil
+		m.suggestionIdx = 0
+		return
+	}
+
+	// 记录当前选中的命令名，以便在列表更新后尝试恢复选中状态
+	var currentSelectedName string
+	if m.showSuggestions && m.suggestionIdx < len(m.suggestions) {
+		currentSelectedName = m.suggestions[m.suggestionIdx].Name()
+	}
+
+	prefix := strings.TrimPrefix(val, "/")
+	var matches []CLICommand
+	newSelectedIdx := -1
+
+	for _, cmd := range ListCommands() {
+		matched := false
+		if strings.HasPrefix(cmd.Name(), prefix) {
+			matched = true
+		} else {
+			for _, alias := range cmd.Aliases() {
+				if strings.HasPrefix(alias, prefix) {
+					matched = true
+					break
+				}
+			}
+		}
+
+		if matched {
+			if cmd.Name() == currentSelectedName {
+				newSelectedIdx = len(matches)
+			}
+			matches = append(matches, cmd)
+		}
+	}
+
+	if len(matches) > 0 {
+		m.suggestions = matches
+		m.showSuggestions = true
+		if newSelectedIdx != -1 {
+			m.suggestionIdx = newSelectedIdx
+		} else if m.suggestionIdx >= len(matches) {
+			m.suggestionIdx = 0
+		}
+	} else {
+		m.showSuggestions = false
+		m.suggestions = nil
+		m.suggestionIdx = 0
+	}
 }
 
 // View 渲染输入框组件。
@@ -111,7 +201,39 @@ func (m replModel) View() string {
 	if m.exiting {
 		return ""
 	}
-	return m.inputBoxView()
+	var b strings.Builder
+	b.WriteString(m.inputBoxView())
+	if m.showSuggestions {
+		b.WriteString("\n")
+		b.WriteString(m.suggestionsView())
+	}
+	return b.String()
+}
+
+// suggestionsView 渲染补全列表。
+func (m replModel) suggestionsView() string {
+	if len(m.suggestions) == 0 {
+		return ""
+	}
+
+	var lines []string
+	for i, cmd := range m.suggestions {
+		name := "/" + cmd.Name()
+		desc := cmd.Description()
+		line := fmt.Sprintf(" %-15s  %s ", name, desc)
+		if i == m.suggestionIdx {
+			line = styleSelected.Render(line)
+		} else {
+			line = styleDim.Render(line)
+		}
+		lines = append(lines, line)
+	}
+
+	return lipgloss.NewStyle().
+		Border(asciiBorder).
+		BorderForeground(lipgloss.Color("8")).
+		Padding(0, 1).
+		Render(strings.Join(lines, "\n"))
 }
 
 // handleEnter 处理回车输入并触发异步分发。

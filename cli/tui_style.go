@@ -21,4 +21,5 @@ var (
 	styleGuideHead = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
 	styleInputBox  = lipgloss.NewStyle().Padding(1, 1).Background(lipgloss.Color("235"))
 	styleInputOn   = lipgloss.NewStyle().Padding(1, 1).Background(lipgloss.Color("235"))
+	styleSelected  = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(lipgloss.Color("4")).Bold(true)
 )
