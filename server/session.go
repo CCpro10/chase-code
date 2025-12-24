@@ -367,7 +367,15 @@ func (s *Session) executeToolCall(ctx context.Context, call servertools.ToolCall
 	if call.ToolName == "apply_patch" {
 		return s.executeApplyPatchWithSafety(ctx, call, step)
 	}
-	return s.Router.Execute(ctx, call)
+	res, err := s.Router.Execute(ctx, call)
+	if err != nil {
+		return ResponseItem{}, err
+	}
+	return ResponseItem{
+		Type:       ResponseItemToolResult,
+		ToolName:   res.ToolName,
+		ToolOutput: res.Output,
+	}, nil
 }
 
 // emitToolOutput 输出工具结果事件。
@@ -496,7 +504,15 @@ func (s *Session) executePatchTool(ctx context.Context, call servertools.ToolCal
 		Step:     step,
 		ToolName: call.ToolName,
 	})
-	return s.Router.Execute(ctx, call)
+	res, err := s.Router.Execute(ctx, call)
+	if err != nil {
+		return ResponseItem{}, err
+	}
+	return ResponseItem{
+		Type:       ResponseItemToolResult,
+		ToolName:   res.ToolName,
+		ToolOutput: res.Output,
+	}, nil
 }
 
 // rejectPatch 处理被拒绝的补丁，返回错误原因。

@@ -1,63 +1,39 @@
 package server
 
 import (
-	"encoding/json"
-	"strings"
-
-	"chase-code/server/tools"
+	"chase-code/server/llm"
 )
 
+// 本文件主要作为 llm 包中公共对话/工具类型的别名出口，避免上层调用方
+// 同时依赖 server 和 llm 两个包的细节。
+
 // Role 表示对话中一条消息的身份。
-type Role string
+type Role = llm.Role
 
 const (
-	RoleSystem    Role = "system"
-	RoleUser      Role = "user"
-	RoleAssistant Role = "assistant"
-	RoleTool      Role = "tool"
+	RoleSystem    = llm.RoleSystem
+	RoleUser      = llm.RoleUser
+	RoleAssistant = llm.RoleAssistant
+	RoleTool      = llm.RoleTool
 )
 
 // Message 是对话的一条消息，类似 OpenAI 的 chat message。
-type Message struct {
-	Role       Role   `json:"role"`
-	Content    string `json:"content"`
-	Name       string `json:"name,omitempty"`
-	ToolCallID string `json:"tool_call_id,omitempty"`
-}
+type Message = llm.Message
 
 // Prompt 对应一次调用的完整输入。
-// 当前实现主要用于 Chat Completions，但同时预留了 ResponseItem / Tool
-// 级别的结构，方便后续在本地编排工具调用，而不强耦合到底层 HTTP 协议。
-type Prompt struct {
-	Messages []Message
-	Tools    []tools.ToolSpec `json:"-"`
-	Items    []ResponseItem   `json:"-"`
-}
+type Prompt = llm.Prompt
 
 // ResponseItemType 表示一次“对话轨迹条目”的类型。
-type ResponseItemType string
+type ResponseItemType = llm.ResponseItemType
 
 const (
-	ResponseItemMessage    ResponseItemType = "message"
-	ResponseItemToolCall   ResponseItemType = "tool_call"
-	ResponseItemToolResult ResponseItemType = "tool_result"
+	ResponseItemMessage    = llm.ResponseItemMessage
+	ResponseItemToolCall   = llm.ResponseItemToolCall
+	ResponseItemToolResult = llm.ResponseItemToolResult
 )
 
 // ResponseItem 是“对话+工具调用”的统一表示。
-type ResponseItem struct {
-	Type ResponseItemType `json:"type"`
-
-	Role Role   `json:"role,omitempty"`
-	Text string `json:"text,omitempty"`
-
-	// ToolCalls 仅用于 assistant 消息，表示与该回复绑定的工具调用。
-	ToolCalls []tools.ToolCall `json:"tool_calls,omitempty"`
-
-	ToolName      string          `json:"tool_name,omitempty"`
-	ToolArguments json.RawMessage `json:"tool_arguments,omitempty"`
-	ToolOutput    string          `json:"tool_output,omitempty"`
-	CallID        string          `json:"call_id,omitempty"`
-}
+type ResponseItem = llm.ResponseItem
 
 // ContextManager 管理一次会话的完整历史（消息 + 工具调用 + 工具结果）。
 type ContextManager struct {
@@ -131,31 +107,7 @@ func (c *ContextManager) History() []ResponseItem {
 	return cp
 }
 
-// 工具输出截断相关的简单常量，可按需调整。
-const (
-	toolPreviewMaxRunes   = 40960
-	toolPreviewMaxLines   = 800
-	toolPreviewTruncation = "...(工具输出已截断)"
-)
-
 // TruncateToolOutput 对工具输出做长度和行数截断，防止上下文被撑爆。
 func TruncateToolOutput(s string) string {
-	if s == "" {
-		return s
-	}
-
-	// 先按 rune 数截断，保证不会截到 UTF-8 半个字符。
-	runes := []rune(s)
-	if len(runes) > toolPreviewMaxRunes {
-		runes = runes[:toolPreviewMaxRunes]
-	}
-	truncated := string(runes)
-
-	// 再按行数截断
-	lines := strings.Split(truncated, "\n")
-	if len(lines) > toolPreviewMaxLines {
-		lines = append(lines[:toolPreviewMaxLines], toolPreviewTruncation)
-	}
-
-	return strings.Join(lines, "\n")
+	return llm.TruncateToolOutput(s)
 }

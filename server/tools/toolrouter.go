@@ -13,18 +13,28 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"chase-code/server"
-	_ "chase-code/server"
-	servermcp "chase-code/server/mcp"
 )
 
 // ToolRouter 是一个极简版的工具路由器，负责根据 ToolCall 调用本地工具。
-// 如需接入 MCP tools，可以在构造时传入 MCPClient，当遇到本地未内置的工具名时
-// 自动尝试通过 MCPClient 代理调用。
+// 如需接入远程工具（例如 MCP tools），可以在构造时传入实现了 ToolCaller
+// 接口的客户端，当遇到本地未内置的工具名时自动尝试通过该客户端代理调用。
+
+// ToolCaller 抽象了一个可以调用远程工具的客户端，例如 MCPClient。
+// 这样 tools 包无需直接依赖具体的 mcp 包，实现解耦。
+type ToolCaller interface {
+	CallTool(ctx context.Context, name string, arguments json.RawMessage) (string, error)
+}
+
 type ToolRouter struct {
 	specs map[string]ToolSpec
-	mcp   servermcp.MCPClient
+	// remote 用于代理执行本地未内置的工具（如 MCP server 提供的工具）。
+	remote ToolCaller
+}
+
+// ToolResult 表示单次工具调用的原始结果，由上层自行封装为 ResponseItem。
+type ToolResult struct {
+	ToolName string
+	Output   string
 }
 
 func NewToolRouter(tools []ToolSpec) *ToolRouter {
@@ -35,14 +45,15 @@ func NewToolRouter(tools []ToolSpec) *ToolRouter {
 	return &ToolRouter{specs: m}
 }
 
-// NewToolRouterWithMCP 在 NewToolRouter 的基础上额外注入一个 MCPClient，
-// 以便在本地未内置某个工具时，能够代理到 MCP server。
-func NewToolRouterWithMCP(tools []ToolSpec, mcp servermcp.MCPClient) *ToolRouter {
+// NewToolRouterWithMCP 在 NewToolRouter 的基础上额外注入一个 ToolCaller，
+// 以便在本地未内置某个工具时，能够代理到远程工具服务（例如 MCP server）。
+// 这里的参数类型是本包定义的接口，而不是具体的 mcp 包类型，避免包之间循环依赖。
+func NewToolRouterWithMCP(tools []ToolSpec, remote ToolCaller) *ToolRouter {
 	m := make(map[string]ToolSpec, len(tools))
 	for _, t := range tools {
 		m[t.Name] = t
 	}
-	return &ToolRouter{specs: m, mcp: mcp}
+	return &ToolRouter{specs: m, remote: remote}
 }
 
 func (r *ToolRouter) Specs() []ToolSpec {
@@ -53,7 +64,7 @@ func (r *ToolRouter) Specs() []ToolSpec {
 	return out
 }
 
-func (r *ToolRouter) Execute(ctx context.Context, call ToolCall) (server.ResponseItem, error) {
+func (r *ToolRouter) Execute(ctx context.Context, call ToolCall) (ToolResult, error) {
 	switch call.ToolName {
 	case "shell":
 		return r.execShell(ctx, call)
@@ -68,20 +79,15 @@ func (r *ToolRouter) Execute(ctx context.Context, call ToolCall) (server.Respons
 	case "apply_patch":
 		return r.execApplyPatch(call)
 	default:
-		// 若注入了 MCPClient，则尝试将未知工具代理到 MCP server。
-		if r.mcp != nil {
-			out, err := r.mcp.CallTool(ctx, call.ToolName, call.Arguments)
+		// 若注入了 remote client，则尝试将未知工具代理到远程服务（如 MCP server）。
+		if r.remote != nil {
+			out, err := r.remote.CallTool(ctx, call.ToolName, call.Arguments)
 			if err != nil {
-				return server.ResponseItem{}, fmt.Errorf("MCP 工具 %s 执行失败: %w", call.ToolName, err)
+				return ToolResult{}, fmt.Errorf("远程工具 %s 执行失败: %w", call.ToolName, err)
 			}
-			return server.ResponseItem{
-				Type:       server.ResponseItemToolResult,
-				ToolName:   call.ToolName,
-				ToolOutput: out,
-				CallID:     call.CallID,
-			}, nil
+			return ToolResult{ToolName: call.ToolName, Output: out}, nil
 		}
-		return server.ResponseItem{}, fmt.Errorf("未知工具: %s", call.ToolName)
+		return ToolResult{}, fmt.Errorf("未知工具: %s", call.ToolName)
 	}
 }
 
@@ -93,27 +99,27 @@ type shellArgs struct {
 	Policy    string `json:"policy,omitempty"`
 }
 
-func (r *ToolRouter) execShell(_ context.Context, call ToolCall) (server.ResponseItem, error) {
+func (r *ToolRouter) execShell(_ context.Context, call ToolCall) (ToolResult, error) {
 	var args shellArgs
 	if err := json.Unmarshal(call.Arguments, &args); err != nil {
-		return server.ResponseItem{}, fmt.Errorf("解析 shell 参数失败: %w", err)
+		return ToolResult{}, fmt.Errorf("解析 shell 参数失败: %w", err)
 	}
 	if strings.TrimSpace(args.Command) == "" {
-		return server.ResponseItem{}, fmt.Errorf("shell 工具需要非空 command 字段")
+		return ToolResult{}, fmt.Errorf("shell 工具需要非空 command 字段")
 	}
 
 	policy := SandboxWorkspaceWrite
 	if args.Policy != "" {
 		p, err := ParseSandboxPolicy(args.Policy)
 		if err != nil {
-			return server.ResponseItem{}, err
+			return ToolResult{}, err
 		}
 		policy = p
 	}
 
 	shell := DetectUserShell()
 	if shell.Kind == ShellUnknown {
-		return server.ResponseItem{}, fmt.Errorf("无法自动检测用户 shell")
+		return ToolResult{}, fmt.Errorf("无法自动检测用户 shell")
 	}
 
 	timeout := 10 * time.Second
@@ -124,13 +130,13 @@ func (r *ToolRouter) execShell(_ context.Context, call ToolCall) (server.Respons
 	shellArgs := shell.DeriveExecArgs(args.Command, true)
 	cwd, err := os.Getwd()
 	if err != nil {
-		return server.ResponseItem{}, fmt.Errorf("获取当前工作目录失败: %w", err)
+		return ToolResult{}, fmt.Errorf("获取当前工作目录失败: %w", err)
 	}
 	params := ExecParams{Command: shellArgs, Cwd: cwd, Timeout: timeout, Env: os.Environ()}
 
 	res, err := RunExec(params, policy)
 	if err != nil {
-		return server.ResponseItem{}, err
+		return ToolResult{}, err
 	}
 
 	// 将命令输出与元信息一起返回给模型，便于后续推理。
@@ -141,7 +147,7 @@ func (r *ToolRouter) execShell(_ context.Context, call ToolCall) (server.Respons
 	}
 	summary := fmt.Sprintf("command=%q exit_code=%d duration=%s timed_out=%v", args.Command, res.ExitCode, res.Duration, res.TimedOut)
 	toolOutput := output + "\n---\n" + summary
-	return server.ResponseItem{Type: server.ResponseItemToolResult, ToolName: "shell", ToolOutput: toolOutput, CallID: call.CallID}, nil
+	return ToolResult{ToolName: "shell", Output: toolOutput}, nil
 }
 
 // ---------------- read_file ----------------
@@ -151,13 +157,13 @@ type readFileArgs struct {
 	MaxBytes int    `json:"max_bytes,omitempty"`
 }
 
-func (r *ToolRouter) execReadFile(call ToolCall) (server.ResponseItem, error) {
+func (r *ToolRouter) execReadFile(call ToolCall) (ToolResult, error) {
 	var args readFileArgs
 	if err := json.Unmarshal(call.Arguments, &args); err != nil {
-		return server.ResponseItem{}, fmt.Errorf("解析 read_file 参数失败: %w", err)
+		return ToolResult{}, fmt.Errorf("解析 read_file 参数失败: %w", err)
 	}
 	if strings.TrimSpace(args.Path) == "" {
-		return server.ResponseItem{}, fmt.Errorf("read_file 需要 path 字段")
+		return ToolResult{}, fmt.Errorf("read_file 需要 path 字段")
 	}
 	maxBytes := args.MaxBytes
 	if maxBytes <= 0 {
@@ -165,10 +171,10 @@ func (r *ToolRouter) execReadFile(call ToolCall) (server.ResponseItem, error) {
 	}
 	data, err := ReadFileLimited(args.Path, maxBytes)
 	if err != nil {
-		return server.ResponseItem{}, err
+		return ToolResult{}, err
 	}
 
-	return server.ResponseItem{Type: server.ResponseItemToolResult, ToolName: "read_file", ToolOutput: string(data), CallID: call.CallID}, nil
+	return ToolResult{ToolName: "read_file", Output: string(data)}, nil
 }
 
 // ---------------- edit/apply_patch ----------------
@@ -180,34 +186,34 @@ type patchFileArgs struct {
 	All  bool   `json:"all,omitempty"`
 }
 
-func (r *ToolRouter) execEditFile(call ToolCall) (server.ResponseItem, error) {
+func (r *ToolRouter) execEditFile(call ToolCall) (ToolResult, error) {
 	// 保留 edit_file 作为 apply_patch 的别名，方便向后兼容。
 	return r.execPatchCommon("edit_file", call)
 }
 
-func (r *ToolRouter) execApplyPatch(call ToolCall) (server.ResponseItem, error) {
+func (r *ToolRouter) execApplyPatch(call ToolCall) (ToolResult, error) {
 	return r.execPatchCommon("apply_patch", call)
 }
 
-func (r *ToolRouter) execPatchCommon(toolName string, call ToolCall) (server.ResponseItem, error) {
+func (r *ToolRouter) execPatchCommon(toolName string, call ToolCall) (ToolResult, error) {
 	var args patchFileArgs
 	if err := json.Unmarshal(call.Arguments, &args); err != nil {
-		return server.ResponseItem{}, fmt.Errorf("解析 %s 参数失败: %w", toolName, err)
+		return ToolResult{}, fmt.Errorf("解析 %s 参数失败: %w", toolName, err)
 	}
 	if strings.TrimSpace(args.File) == "" || strings.TrimSpace(args.From) == "" {
-		return server.ResponseItem{}, fmt.Errorf("%s 需要 file 和 from 字段", toolName)
+		return ToolResult{}, fmt.Errorf("%s 需要 file 和 from 字段", toolName)
 	}
 
 	abs, err := filepath.Abs(args.File)
 	if err != nil {
-		return server.ResponseItem{}, fmt.Errorf("解析文件路径失败: %w", err)
+		return ToolResult{}, fmt.Errorf("解析文件路径失败: %w", err)
 	}
 	if err := ApplyEdit(abs, args.From, args.To, args.All); err != nil {
-		return server.ResponseItem{}, err
+		return ToolResult{}, err
 	}
 
 	msg := fmt.Sprintf("已更新文件: %s", abs)
-	return server.ResponseItem{Type: server.ResponseItemToolResult, ToolName: toolName, ToolOutput: msg, CallID: call.CallID}, nil
+	return ToolResult{ToolName: toolName, Output: msg}, nil
 }
 
 // ---------------- list_dir ----------------
@@ -216,18 +222,18 @@ type listDirArgs struct {
 	Path string `json:"path"`
 }
 
-func (r *ToolRouter) execListDir(call ToolCall) (server.ResponseItem, error) {
+func (r *ToolRouter) execListDir(call ToolCall) (ToolResult, error) {
 	var args listDirArgs
 	if err := json.Unmarshal(call.Arguments, &args); err != nil {
-		return server.ResponseItem{}, fmt.Errorf("解析 list_dir 参数失败: %w", err)
+		return ToolResult{}, fmt.Errorf("解析 list_dir 参数失败: %w", err)
 	}
 	if strings.TrimSpace(args.Path) == "" {
-		return server.ResponseItem{}, fmt.Errorf("list_dir 需要 path 字段")
+		return ToolResult{}, fmt.Errorf("list_dir 需要 path 字段")
 	}
 
 	entries, err := os.ReadDir(args.Path)
 	if err != nil {
-		return server.ResponseItem{}, fmt.Errorf("读取目录失败: %w", err)
+		return ToolResult{}, fmt.Errorf("读取目录失败: %w", err)
 	}
 
 	var b strings.Builder
@@ -239,7 +245,7 @@ func (r *ToolRouter) execListDir(call ToolCall) (server.ResponseItem, error) {
 		fmt.Fprintln(&b, name)
 	}
 
-	return server.ResponseItem{Type: server.ResponseItemToolResult, ToolName: "list_dir", ToolOutput: b.String(), CallID: call.CallID}, nil
+	return ToolResult{ToolName: "list_dir", Output: b.String()}, nil
 }
 
 // ---------------- grep_files ----------------
@@ -250,22 +256,22 @@ type grepFilesArgs struct {
 	MaxMatches int    `json:"max_matches,omitempty"`
 }
 
-func (r *ToolRouter) execGrepFiles(call ToolCall) (server.ResponseItem, error) {
+func (r *ToolRouter) execGrepFiles(call ToolCall) (ToolResult, error) {
 	args, err := parseGrepFilesArgs(call.Arguments)
 	if err != nil {
-		return server.ResponseItem{}, err
+		return ToolResult{}, err
 	}
 
 	out, err := runRipgrep(args.Root, args.Pattern, args.MaxMatches)
 	if err == nil {
-		return buildGrepResult(call.CallID, out), nil
+		return buildGrepResult(out), nil
 	}
 
 	out, err = runGrepFallback(args)
 	if err != nil {
-		return server.ResponseItem{}, err
+		return ToolResult{}, err
 	}
-	return buildGrepResult(call.CallID, out), nil
+	return buildGrepResult(out), nil
 }
 
 // runRipgrep 使用 rg(1) 在 root 下搜索 pattern，并限制返回的匹配行数。
@@ -354,14 +360,9 @@ func runGrepFallback(args grepFilesArgs) (string, error) {
 }
 
 // buildGrepResult 标准化 grep_files 输出结果。
-func buildGrepResult(callID, output string) server.ResponseItem {
+func buildGrepResult(output string) ToolResult {
 	if strings.TrimSpace(output) == "" {
 		output = "未找到匹配项"
 	}
-	return server.ResponseItem{
-		Type:       server.ResponseItemToolResult,
-		ToolName:   "grep_files",
-		ToolOutput: output,
-		CallID:     callID,
-	}
+	return ToolResult{ToolName: "grep_files", Output: output}
 }

@@ -2,35 +2,102 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 
-	serverpkg "chase-code/server"
 	"chase-code/server/tools"
 )
 
-// 复用 server 包定义的上下文类型，避免循环依赖与重复定义。
-type Role = serverpkg.Role
+// ===== 对话与工具调用的通用上下文类型（供 server 与 llm 共同使用） =====
+
+// Role 表示对话中一条消息的身份。
+type Role string
 
 const (
-	RoleSystem    = serverpkg.RoleSystem
-	RoleUser      = serverpkg.RoleUser
-	RoleAssistant = serverpkg.RoleAssistant
-	RoleTool      = serverpkg.RoleTool
+	RoleSystem    Role = "system"
+	RoleUser      Role = "user"
+	RoleAssistant Role = "assistant"
+	RoleTool      Role = "tool"
 )
 
-type Prompt = serverpkg.Prompt
+// Message 是对话的一条消息，类似 OpenAI 的 chat message。
+type Message struct {
+	Role       Role   `json:"role"`
+	Content    string `json:"content"`
+	Name       string `json:"name,omitempty"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
+}
+
+// ResponseItemType 表示一次“对话轨迹条目”的类型。
+type ResponseItemType string
+
+const (
+	ResponseItemMessage    ResponseItemType = "message"
+	ResponseItemToolCall   ResponseItemType = "tool_call"
+	ResponseItemToolResult ResponseItemType = "tool_result"
+)
+
+// ResponseItem 是“对话+工具调用”的统一表示。
+type ResponseItem struct {
+	Type ResponseItemType `json:"type"`
+
+	Role Role   `json:"role,omitempty"`
+	Text string `json:"text,omitempty"`
+
+	// ToolCalls 仅用于 assistant 消息，表示与该回复绑定的工具调用。
+	ToolCalls []tools.ToolCall `json:"tool_calls,omitempty"`
+
+	ToolName      string          `json:"tool_name,omitempty"`
+	ToolArguments json.RawMessage `json:"tool_arguments,omitempty"`
+	ToolOutput    string          `json:"tool_output,omitempty"`
+	CallID        string          `json:"call_id,omitempty"`
+}
+
+// Prompt 对应一次调用的完整输入。
+// 当前实现主要用于 Chat Completions / Responses，但同时预留了 ResponseItem / Tool
+// 级别的结构，方便在本地编排工具调用，而不强耦合到底层 HTTP 协议。
+type Prompt struct {
+	Messages []Message
+	Tools    []tools.ToolSpec `json:"-"`
+	Items    []ResponseItem   `json:"-"`
+}
+
+// 为方便其它包使用，直接公开 tools 包里的类型。
 type ToolSpec = tools.ToolSpec
 type ToolCall = tools.ToolCall
-type ResponseItem = serverpkg.ResponseItem
-type ResponseItemType = serverpkg.ResponseItemType
 
+// 工具输出截断相关常量，可按需调整。
 const (
-	ResponseItemMessage    = serverpkg.ResponseItemMessage
-	ResponseItemToolCall   = serverpkg.ResponseItemToolCall
-	ResponseItemToolResult = serverpkg.ResponseItemToolResult
+	toolPreviewMaxRunes   = 40960
+	toolPreviewMaxLines   = 800
+	toolPreviewTruncation = "...(工具输出已截断)"
 )
 
+// TruncateToolOutput 对工具输出做长度和行数截断，防止上下文被撑爆。
+func TruncateToolOutput(s string) string {
+	if s == "" {
+		return s
+	}
+
+	// 先按 rune 数截断，保证不会截到 UTF-8 半个字符。
+	runes := []rune(s)
+	if len(runes) > toolPreviewMaxRunes {
+		runes = runes[:toolPreviewMaxRunes]
+	}
+	truncated := string(runes)
+
+	// 再按行数截断
+	lines := strings.Split(truncated, "\n")
+	if len(lines) > toolPreviewMaxLines {
+		lines = append(lines[:toolPreviewMaxLines], toolPreviewTruncation)
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// 内部使用的别名，便于在本包内与旧代码兼容。
 func truncateToolOutput(s string) string {
-	return serverpkg.TruncateToolOutput(s)
+	return TruncateToolOutput(s)
 }
 
 // LLMEventKind / LLMEvent / LLMStream 参考 codex 的流式接口抽象，当前实现
