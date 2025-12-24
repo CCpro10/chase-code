@@ -15,7 +15,7 @@ import (
 	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"chase-code/server"
+	"chase-code/server/tools"
 )
 
 // MCPRemoteServerConfig 描述一个通过 HTTP/SSE 方式连接的 MCP 服务。
@@ -181,7 +181,7 @@ func initMCPClient(ctx context.Context, name string, client *gosdkclient.Client,
 }
 
 // MergeMCPTools 使用多个 MCPClient 拉取工具列表，并合并为 MCPTool/ToolSpec。
-func MergeMCPTools(ctx context.Context, clients []MCPClient) ([]MCPTool, []server.ToolSpec, error) {
+func MergeMCPTools(ctx context.Context, clients []MCPClient) ([]MCPTool, []tools.ToolSpec, error) {
 	if len(clients) == 0 {
 		return nil, nil, nil
 	}

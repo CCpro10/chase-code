@@ -8,12 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"chase-code/server"
 	servermcp "chase-code/server/mcp"
 	servertools "chase-code/server/tools"
 )
 
-func initMCPTools(cfgPath string, tools []server.ToolSpec, router *servertools.ToolRouter) ([]server.ToolSpec, *servertools.ToolRouter, error) {
+func initMCPTools(cfgPath string, tools []servertools.ToolSpec, router *servertools.ToolRouter) ([]servertools.ToolSpec, *servertools.ToolRouter, error) {
 	cfgPath = strings.TrimSpace(cfgPath)
 	if cfgPath == "" {
 		return tools, router, nil

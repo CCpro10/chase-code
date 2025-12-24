@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"chase-code/agent"
+	"chase-code/server"
 )
 
 // sendApproval 将审批结果写入当前 agent Session 的审批通道，并返回提示信息。
@@ -18,7 +18,7 @@ func sendApproval(reqID string, approved bool) (string, error) {
 	timer := time.NewTimer(2 * time.Second)
 	defer timer.Stop()
 	select {
-	case ch <- agent.ApprovalDecision{RequestID: reqID, Approved: approved}:
+	case ch <- server.ApprovalDecision{RequestID: reqID, Approved: approved}:
 		if approved {
 			return fmt.Sprintf("已批准补丁请求: %s", reqID), nil
 		}

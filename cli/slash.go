@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"chase-code/agent"
+	"chase-code/server/config"
 )
 
 // handleApprovalsCommand 实现 /approvals 命令：
@@ -26,14 +26,14 @@ func handleApprovalsCommand(args []string) ([]string, error) {
 		}, nil
 	}
 
-	var mode agent.ApprovalMode
+	var mode config.ApprovalMode
 	switch strings.ToLower(args[0]) {
 	case "auto":
-		mode = agent.ApprovalModeAuto
+		mode = config.ApprovalModeAuto
 	case "ask", "always_ask":
-		mode = agent.ApprovalModeAlwaysAsk
+		mode = config.ApprovalModeAlwaysAsk
 	case "approve", "always_approve":
-		mode = agent.ApprovalModeAlwaysApprove
+		mode = config.ApprovalModeAlwaysApprove
 	default:
 		return nil, fmt.Errorf("未知审批模式: %s（可选: auto|ask|approve）", args[0])
 	}

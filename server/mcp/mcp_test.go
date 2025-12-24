@@ -9,11 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"chase-code/server"
 	mcpclient "github.com/mark3labs/mcp-go/client"
 	mcptransport "github.com/mark3labs/mcp-go/client/transport"
 	mcpm "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+
+	tools2 "chase-code/server/tools"
 )
 
 type fakeMCPClient struct {
@@ -54,7 +55,7 @@ func TestToolSpecsFromMCP(t *testing.T) {
 		t.Fatalf("expect 1 ToolSpec, got %d", len(specs))
 	}
 	s := specs[0]
-	if s.Kind != server.ToolKindCustom {
+	if s.Kind != tools2.ToolKindCustom {
 		t.Errorf("unexpected kind: %v", s.Kind)
 	}
 	if s.Name != "fs.read" {

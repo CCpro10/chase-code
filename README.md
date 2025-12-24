@@ -28,7 +28,7 @@ Optionally add the binary to your `PATH` for convenience.
 
 ## Configure LLM
 
-LLM config lives in `server/llm.go` (`LLMConfig` and `NewLLMConfigFromEnv`).
+LLM config lives in `server/llm/config.go` (`LLMModel`, `NewLLMModelsFromEnv`).
 
 ### Common environment variables
 

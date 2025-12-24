@@ -20,6 +20,10 @@ type Config struct {
 	KimiModel          string
 	KimiBaseURL        string
 	MoonshotAPIKey     string
+	CocoJWTKey         string
+	CocoCacheKey       string
+	CocoModel          string
+	CocoBaseURL        string
 	ApplyPatchApproval string
 }
 
@@ -48,6 +52,10 @@ func loadFromEnv() Config {
 		KimiModel:          strings.TrimSpace(os.Getenv("CHASE_CODE_KIMI_MODEL")),
 		KimiBaseURL:        strings.TrimSpace(os.Getenv("CHASE_CODE_KIMI_BASE_URL")),
 		MoonshotAPIKey:     strings.TrimSpace(os.Getenv("MOONSHOT_API_KEY")),
+		CocoJWTKey:         strings.TrimSpace(os.Getenv("cocojwtkey")),
+		CocoCacheKey:       strings.TrimSpace(os.Getenv("cococachekey")),
+		CocoModel:          strings.TrimSpace(os.Getenv("CHASE_CODE_COCO_MODEL")),
+		CocoBaseURL:        strings.TrimSpace(os.Getenv("CHASE_CODE_COCO_BASE_URL")),
 		ApplyPatchApproval: strings.TrimSpace(os.Getenv("CHASE_CODE_APPLY_PATCH_APPROVAL")),
 	}
 }
@@ -55,7 +63,7 @@ func loadFromEnv() Config {
 // Summary 返回可安全打印的配置摘要（会脱敏 key）。
 func (c Config) Summary() string {
 	return fmt.Sprintf(
-		"provider=%s mcp_config=%s log_file=%s openai_model=%s openai_base_url=%s openai_api_key=%s kimi_model=%s kimi_base_url=%s kimi_api_key=%s moonshot_api_key=%s apply_patch_approval=%s",
+		"llm_selector=%s mcp_config=%s log_file=%s openai_model=%s openai_base_url=%s openai_api_key=%s kimi_model=%s kimi_base_url=%s kimi_api_key=%s moonshot_api_key=%s coco_model=%s coco_base_url=%s coco_jwt_key=%s coco_cache_key=%s apply_patch_approval=%s",
 		emptyAsDefault(c.LLMProvider, "(default)"),
 		emptyAsDefault(c.MCPConfigPath, "(empty)"),
 		emptyAsDefault(c.LogFile, "(empty)"),
@@ -66,6 +74,10 @@ func (c Config) Summary() string {
 		emptyAsDefault(c.KimiBaseURL, "(default)"),
 		maskSecret(c.KimiAPIKey),
 		maskSecret(c.MoonshotAPIKey),
+		emptyAsDefault(c.CocoModel, "(default)"),
+		emptyAsDefault(c.CocoBaseURL, "(default)"),
+		maskSecret(c.CocoJWTKey),
+		maskSecret(c.CocoCacheKey),
 		emptyAsDefault(c.ApplyPatchApproval, "(default)"),
 	)
 }

@@ -28,7 +28,7 @@ go build -o chase-code .
 
 ## 配置 LLM
 
-LLM 配置集中在 `server/llm.go`（`LLMConfig`、`NewLLMConfigFromEnv`）。
+LLM 配置集中在 `server/llm/config.go`（`LLMModel`、`NewLLMModelsFromEnv`）。
 
 ### 通用环境变量
 

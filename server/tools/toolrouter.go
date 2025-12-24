@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"chase-code/server"
+	_ "chase-code/server"
 	servermcp "chase-code/server/mcp"
 )
 
@@ -22,12 +23,12 @@ import (
 // 如需接入 MCP tools，可以在构造时传入 MCPClient，当遇到本地未内置的工具名时
 // 自动尝试通过 MCPClient 代理调用。
 type ToolRouter struct {
-	specs map[string]server.ToolSpec
+	specs map[string]ToolSpec
 	mcp   servermcp.MCPClient
 }
 
-func NewToolRouter(tools []server.ToolSpec) *ToolRouter {
-	m := make(map[string]server.ToolSpec, len(tools))
+func NewToolRouter(tools []ToolSpec) *ToolRouter {
+	m := make(map[string]ToolSpec, len(tools))
 	for _, t := range tools {
 		m[t.Name] = t
 	}
@@ -36,23 +37,23 @@ func NewToolRouter(tools []server.ToolSpec) *ToolRouter {
 
 // NewToolRouterWithMCP 在 NewToolRouter 的基础上额外注入一个 MCPClient，
 // 以便在本地未内置某个工具时，能够代理到 MCP server。
-func NewToolRouterWithMCP(tools []server.ToolSpec, mcp servermcp.MCPClient) *ToolRouter {
-	m := make(map[string]server.ToolSpec, len(tools))
+func NewToolRouterWithMCP(tools []ToolSpec, mcp servermcp.MCPClient) *ToolRouter {
+	m := make(map[string]ToolSpec, len(tools))
 	for _, t := range tools {
 		m[t.Name] = t
 	}
 	return &ToolRouter{specs: m, mcp: mcp}
 }
 
-func (r *ToolRouter) Specs() []server.ToolSpec {
-	out := make([]server.ToolSpec, 0, len(r.specs))
+func (r *ToolRouter) Specs() []ToolSpec {
+	out := make([]ToolSpec, 0, len(r.specs))
 	for _, s := range r.specs {
 		out = append(out, s)
 	}
 	return out
 }
 
-func (r *ToolRouter) Execute(ctx context.Context, call server.ToolCall) (server.ResponseItem, error) {
+func (r *ToolRouter) Execute(ctx context.Context, call ToolCall) (server.ResponseItem, error) {
 	switch call.ToolName {
 	case "shell":
 		return r.execShell(ctx, call)
@@ -92,7 +93,7 @@ type shellArgs struct {
 	Policy    string `json:"policy,omitempty"`
 }
 
-func (r *ToolRouter) execShell(_ context.Context, call server.ToolCall) (server.ResponseItem, error) {
+func (r *ToolRouter) execShell(_ context.Context, call ToolCall) (server.ResponseItem, error) {
 	var args shellArgs
 	if err := json.Unmarshal(call.Arguments, &args); err != nil {
 		return server.ResponseItem{}, fmt.Errorf("解析 shell 参数失败: %w", err)
@@ -150,7 +151,7 @@ type readFileArgs struct {
 	MaxBytes int    `json:"max_bytes,omitempty"`
 }
 
-func (r *ToolRouter) execReadFile(call server.ToolCall) (server.ResponseItem, error) {
+func (r *ToolRouter) execReadFile(call ToolCall) (server.ResponseItem, error) {
 	var args readFileArgs
 	if err := json.Unmarshal(call.Arguments, &args); err != nil {
 		return server.ResponseItem{}, fmt.Errorf("解析 read_file 参数失败: %w", err)
@@ -179,16 +180,16 @@ type patchFileArgs struct {
 	All  bool   `json:"all,omitempty"`
 }
 
-func (r *ToolRouter) execEditFile(call server.ToolCall) (server.ResponseItem, error) {
+func (r *ToolRouter) execEditFile(call ToolCall) (server.ResponseItem, error) {
 	// 保留 edit_file 作为 apply_patch 的别名，方便向后兼容。
 	return r.execPatchCommon("edit_file", call)
 }
 
-func (r *ToolRouter) execApplyPatch(call server.ToolCall) (server.ResponseItem, error) {
+func (r *ToolRouter) execApplyPatch(call ToolCall) (server.ResponseItem, error) {
 	return r.execPatchCommon("apply_patch", call)
 }
 
-func (r *ToolRouter) execPatchCommon(toolName string, call server.ToolCall) (server.ResponseItem, error) {
+func (r *ToolRouter) execPatchCommon(toolName string, call ToolCall) (server.ResponseItem, error) {
 	var args patchFileArgs
 	if err := json.Unmarshal(call.Arguments, &args); err != nil {
 		return server.ResponseItem{}, fmt.Errorf("解析 %s 参数失败: %w", toolName, err)
@@ -215,7 +216,7 @@ type listDirArgs struct {
 	Path string `json:"path"`
 }
 
-func (r *ToolRouter) execListDir(call server.ToolCall) (server.ResponseItem, error) {
+func (r *ToolRouter) execListDir(call ToolCall) (server.ResponseItem, error) {
 	var args listDirArgs
 	if err := json.Unmarshal(call.Arguments, &args); err != nil {
 		return server.ResponseItem{}, fmt.Errorf("解析 list_dir 参数失败: %w", err)
@@ -249,7 +250,7 @@ type grepFilesArgs struct {
 	MaxMatches int    `json:"max_matches,omitempty"`
 }
 
-func (r *ToolRouter) execGrepFiles(call server.ToolCall) (server.ResponseItem, error) {
+func (r *ToolRouter) execGrepFiles(call ToolCall) (server.ResponseItem, error) {
 	args, err := parseGrepFilesArgs(call.Arguments)
 	if err != nil {
 		return server.ResponseItem{}, err

@@ -9,14 +9,14 @@ import (
 	"sync"
 	"time"
 
-	"chase-code/agent"
 	"chase-code/config"
 	"chase-code/server"
+	"chase-code/server/llm"
 	servertools "chase-code/server/tools"
 )
 
 type replAgentSession struct {
-	session *agent.Session
+	session *server.Session
 	events  chan server.Event
 }
 
@@ -98,12 +98,12 @@ func initReplAgentSession(events chan server.Event) (*replAgentSession, error) {
 	}
 
 	_, router := initToolRouter()
-	systemPrompt := servertools.BuildToolSystemPrompt(router.Specs())
+	systemPrompt := server.BuildToolSystemPrompt(router.Specs())
 
 	if events == nil {
 		events = make(chan server.Event, 128)
 	}
-	as := agent.NewSession(client, router, server.ChanEventSink{Ch: events}, maxSteps)
+	as := server.NewSession(client, router, server.ChanEventSink{Ch: events}, maxSteps)
 	as.ResetHistoryWithSystemPrompt(systemPrompt)
 
 	return &replAgentSession{
@@ -113,12 +113,12 @@ func initReplAgentSession(events chan server.Event) (*replAgentSession, error) {
 }
 
 // initLLMClient 构建 LLM 配置并初始化客户端。
-func initLLMClient() (server.LLMClient, error) {
-	cfg, err := server.NewLLMConfigFromEnv()
+func initLLMClient() (llm.LLMClient, error) {
+	model, err := llm.NewLLMModelFromEnv()
 	if err != nil {
 		return nil, err
 	}
-	client, err := server.NewLLMClient(cfg)
+	client, err := llm.NewLLMClient(model)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +127,7 @@ func initLLMClient() (server.LLMClient, error) {
 }
 
 // initToolRouter 初始化本地工具并按需接入 MCP。
-func initToolRouter() ([]server.ToolSpec, *servertools.ToolRouter) {
+func initToolRouter() ([]servertools.ToolSpec, *servertools.ToolRouter) {
 	tools := servertools.DefaultToolSpecs()
 	router := servertools.NewToolRouter(tools)
 

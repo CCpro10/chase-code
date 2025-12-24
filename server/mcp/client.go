@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 
-	"chase-code/server"
 	gosdkclient "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
+
+	"chase-code/server/tools"
 )
 
 // MCPTool 描述来自 MCP 服务器的一条工具定义信息。
@@ -30,11 +31,11 @@ type MCPClient interface {
 
 // ToolSpecsFromMCP 将 MCPTool 列表转换为 chase-code 内部使用的 ToolSpec 列表，
 // 方便统一拼接到 DefaultToolSpecs 或自定义工具集合中。
-func ToolSpecsFromMCP(tools []MCPTool) []server.ToolSpec {
-	out := make([]server.ToolSpec, 0, len(tools))
+func ToolSpecsFromMCP(tools []MCPTool) []tools.ToolSpec {
+	out := make([]tools.ToolSpec, 0, len(tools))
 	for _, t := range tools {
-		out = append(out, server.ToolSpec{
-			Kind:        server.ToolKindCustom,
+		out = append(out, tools.ToolSpec{
+			Kind:        tools.ToolKindCustom,
 			Name:        t.Name,
 			Description: t.Description,
 			Parameters:  t.Parameters,

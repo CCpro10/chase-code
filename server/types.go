@@ -3,6 +3,8 @@ package server
 import (
 	"encoding/json"
 	"strings"
+
+	"chase-code/server/tools"
 )
 
 // Role 表示对话中一条消息的身份。
@@ -28,27 +30,8 @@ type Message struct {
 // 级别的结构，方便后续在本地编排工具调用，而不强耦合到底层 HTTP 协议。
 type Prompt struct {
 	Messages []Message
-	Tools    []ToolSpec     `json:"-"`
-	Items    []ResponseItem `json:"-"`
-}
-
-// ToolKind 对应工具的类别，参考 codex 的 ToolSpec。
-type ToolKind string
-
-const (
-	ToolKindFunction   ToolKind = "function"
-	ToolKindLocalShell ToolKind = "local_shell"
-	ToolKindWebSearch  ToolKind = "web_search"
-	ToolKindCustom     ToolKind = "custom"
-)
-
-// ToolSpec 描述一个可被模型调用的工具定义。
-// 对于当前实现，主要依赖 Name 和 Description。
-type ToolSpec struct {
-	Kind        ToolKind        `json:"kind"`
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Tools    []tools.ToolSpec `json:"-"`
+	Items    []ResponseItem   `json:"-"`
 }
 
 // ResponseItemType 表示一次“对话轨迹条目”的类型。
@@ -68,19 +51,12 @@ type ResponseItem struct {
 	Text string `json:"text,omitempty"`
 
 	// ToolCalls 仅用于 assistant 消息，表示与该回复绑定的工具调用。
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	ToolCalls []tools.ToolCall `json:"tool_calls,omitempty"`
 
 	ToolName      string          `json:"tool_name,omitempty"`
 	ToolArguments json.RawMessage `json:"tool_arguments,omitempty"`
 	ToolOutput    string          `json:"tool_output,omitempty"`
 	CallID        string          `json:"call_id,omitempty"`
-}
-
-// ToolCall 描述一条来自 LLM 的工具调用请求，对应约定的 JSON 协议。
-type ToolCall struct {
-	ToolName  string          `json:"tool_name"`
-	Arguments json.RawMessage `json:"arguments"`
-	CallID    string          `json:"call_id,omitempty"`
 }
 
 // ContextManager 管理一次会话的完整历史（消息 + 工具调用 + 工具结果）。
@@ -130,7 +106,7 @@ func (c *ContextManager) BuildPromptMessages() []Message {
 			}
 			msgs = append(msgs, Message{
 				Role:       RoleTool,
-				Content:    truncateToolOutput(it.ToolOutput),
+				Content:    TruncateToolOutput(it.ToolOutput),
 				Name:       it.ToolName,
 				ToolCallID: it.CallID,
 			})
@@ -162,8 +138,8 @@ const (
 	toolPreviewTruncation = "...(工具输出已截断)"
 )
 
-// truncateToolOutput 对工具输出做长度和行数截断，防止上下文被工具结果撑爆。
-func truncateToolOutput(s string) string {
+// TruncateToolOutput 对工具输出做长度和行数截断，防止上下文被撑爆。
+func TruncateToolOutput(s string) string {
 	if s == "" {
 		return s
 	}
