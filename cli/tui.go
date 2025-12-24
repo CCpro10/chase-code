@@ -201,13 +201,14 @@ func (m replModel) View() string {
 	if m.exiting {
 		return ""
 	}
-	var b strings.Builder
-	b.WriteString(m.inputBoxView())
-	if m.showSuggestions {
-		b.WriteString("\n")
-		b.WriteString(m.suggestionsView())
+
+	inputView := m.inputBoxView()
+	if !m.showSuggestions || len(m.suggestions) == 0 {
+		return inputView
 	}
-	return b.String()
+
+	// 补全列表放在输入框上方，这样输入框在终端底部的物理位置最稳定
+	return lipgloss.JoinVertical(lipgloss.Left, m.suggestionsView(), inputView)
 }
 
 // suggestionsView 渲染补全列表。
@@ -229,10 +230,12 @@ func (m replModel) suggestionsView() string {
 		lines = append(lines, line)
 	}
 
+	// 设置与输入框一致的宽度，并去掉底部边距，让它与输入框无缝衔接
 	return lipgloss.NewStyle().
 		Border(asciiBorder).
 		BorderForeground(lipgloss.Color("8")).
 		Padding(0, 1).
+		Width(m.width).
 		Render(strings.Join(lines, "\n"))
 }
 
