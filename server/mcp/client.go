@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"log"
 
 	gosdkclient "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -69,13 +70,13 @@ func (c *GoSDKMCPClient) ListTools(ctx context.Context) ([]MCPTool, error) {
 	out := make([]MCPTool, 0, len(res.Tools))
 	for _, t := range res.Tools {
 		var params json.RawMessage
-		if t.RawInputSchema != nil {
-			params = t.RawInputSchema
-		} else if t.InputSchema.Type != "" {
-			if b, err := json.Marshal(t.InputSchema); err == nil {
-				params = b
-			}
+
+		b, err := mcp.ToolArgumentsSchema(t.InputSchema).MarshalJSON()
+		if err != nil {
+			log.Println(err)
+			continue
 		}
+		params = b
 
 		out = append(out, MCPTool{
 			Name:        t.Name,
@@ -84,6 +85,40 @@ func (c *GoSDKMCPClient) ListTools(ctx context.Context) ([]MCPTool, error) {
 		})
 	}
 	return out, nil
+}
+
+// normalizeMCPJSONSchema 尝试修正来自 MCP server 的 JSON Schema，
+// 以满足 OpenAI Responses tools 的校验要求。
+// 目前主要处理类似 `{ "type": "object" }` 但缺少 `properties`
+// 的场景，否则会触发 "object schema missing properties" 错误。
+func normalizeMCPJSONSchema(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		// 无法解析时直接透传，避免静默丢弃。
+		log.Printf("[mcp] 无法解析工具参数 schema，直接透传原始数据: %v", err)
+		return raw
+	}
+
+	typ, _ := m["type"].(string)
+	if typ == "object" {
+		_, hasProps := m["properties"]
+		if !hasProps {
+			// 对于不带任何字段的工具（如 GetCurrentTime），这里补一个空 properties，
+			// 以通过 Responses 的 JSON Schema 校验。
+			m["properties"] = map[string]any{}
+		}
+	}
+
+	fixed, err := json.Marshal(m)
+	if err != nil {
+		log.Printf("[mcp] 序列化修正后的 schema 失败，回退到原始数据: %v", err)
+		return raw
+	}
+	return fixed
 }
 
 // CallTool 调用 go-sdk 的 CallTool API，并将返回内容序列化为字符串。
