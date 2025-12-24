@@ -3,8 +3,11 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Config 汇总所有通过环境变量控制的运行配置。
@@ -25,6 +28,43 @@ type Config struct {
 	CocoModel          string
 	CocoBaseURL        string
 	ApplyPatchApproval string
+
+	// 多模型配置支持
+	LLMConfig *LLMConfig
+}
+
+type LLMConfig struct {
+	Model  ModelNameRef `yaml:"model"`
+	Models []Model      `yaml:"models"`
+}
+
+type ModelNameRef struct {
+	Name string `yaml:"name"`
+}
+
+type Model struct {
+	Name        string             `yaml:"name"`
+	Completions *CompletionsConfig `yaml:"completions,omitempty"`
+	Claude      *ClaudeConfig      `yaml:"claude,omitempty"`
+	Responses   *ResponsesConfig   `yaml:"responses,omitempty"`
+}
+
+type CompletionsConfig struct {
+	APIKey  string `yaml:"api_key"`
+	BaseURL string `yaml:"base_url"`
+	Model   string `yaml:"model"`
+}
+
+type ClaudeConfig struct {
+	APIKey  string `yaml:"api_key"`
+	BaseURL string `yaml:"base_url"`
+	Model   string `yaml:"model"`
+}
+
+type ResponsesConfig struct {
+	APIKey  string `yaml:"api_key"`
+	BaseURL string `yaml:"base_url"`
+	Model   string `yaml:"model"`
 }
 
 var (
@@ -36,6 +76,7 @@ var (
 func Get() *Config {
 	once.Do(func() {
 		cfg = loadFromEnv()
+		cfg.LLMConfig = loadFromFile()
 	})
 	return &cfg
 }
@@ -60,9 +101,35 @@ func loadFromEnv() Config {
 	}
 }
 
+func loadFromFile() *LLMConfig {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+
+	configPath := filepath.Join(home, ".chase-code", "config.yaml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		// 尝试读取 config.yml
+		configPath = filepath.Join(home, ".chase-code", "config.yml")
+		data, err = os.ReadFile(configPath)
+		if err != nil {
+			return nil
+		}
+	}
+
+	var llc LLMConfig
+	if err := yaml.Unmarshal(data, &llc); err != nil {
+		fmt.Fprintf(os.Stderr, "解析配置文件失败: %v\n", err)
+		return nil
+	}
+
+	return &llc
+}
+
 // Summary 返回可安全打印的配置摘要（会脱敏 key）。
 func (c Config) Summary() string {
-	return fmt.Sprintf(
+	s := fmt.Sprintf(
 		"llm_selector=%s mcp_config=%s log_file=%s openai_model=%s openai_base_url=%s openai_api_key=%s kimi_model=%s kimi_base_url=%s kimi_api_key=%s moonshot_api_key=%s coco_model=%s coco_base_url=%s coco_jwt_key=%s coco_cache_key=%s apply_patch_approval=%s",
 		emptyAsDefault(c.LLMProvider, "(default)"),
 		emptyAsDefault(c.MCPConfigPath, "(empty)"),
@@ -80,6 +147,11 @@ func (c Config) Summary() string {
 		maskSecret(c.CocoCacheKey),
 		emptyAsDefault(c.ApplyPatchApproval, "(default)"),
 	)
+
+	if c.LLMConfig != nil {
+		s += fmt.Sprintf(" file_model=%s models_count=%d", c.LLMConfig.Model.Name, len(c.LLMConfig.Models))
+	}
+	return s
 }
 
 func emptyAsDefault(v, def string) string {

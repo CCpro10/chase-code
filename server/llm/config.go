@@ -4,9 +4,16 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"chase-code/config"
+)
+
+var (
+	globalModels *LLMModels
+	loadOnce     sync.Once
+	loadErr      error
 )
 
 const (
@@ -56,8 +63,53 @@ type modelEntry struct {
 	err       error
 }
 
+// Init 初始化 LLM 配置，通常在应用启动时调用。
+func Init() error {
+	_, err := NewLLMModelsFromEnv()
+	return err
+}
+
 // NewLLMModelsFromEnv 从环境变量加载所有模型，并选择当前模型。
 func NewLLMModelsFromEnv() (*LLMModels, error) {
+	loadOnce.Do(func() {
+		globalModels, loadErr = loadLLMModelsFromEnv()
+	})
+	return globalModels, loadErr
+}
+
+// GetModels 返回所有已加载的模型。
+func GetModels() []*LLMModel {
+	ms, _ := NewLLMModelsFromEnv()
+	if ms == nil {
+		return nil
+	}
+	return ms.All
+}
+
+// GetCurrentModel 返回当前选择的模型。
+func GetCurrentModel() *LLMModel {
+	ms, _ := NewLLMModelsFromEnv()
+	if ms == nil {
+		return nil
+	}
+	return ms.Current
+}
+
+// FindModel 根据 alias 查找模型。
+func FindModel(alias string) (*LLMModel, error) {
+	ms, err := NewLLMModelsFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range ms.All {
+		if strings.EqualFold(m.Alias, alias) {
+			return m, nil
+		}
+	}
+	return nil, fmt.Errorf("未找到别名为 %s 的模型", alias)
+}
+
+func loadLLMModelsFromEnv() (*LLMModels, error) {
 	env := config.Get()
 	entries := []modelEntry{
 		buildOpenAIEntry(env),
@@ -65,13 +117,70 @@ func NewLLMModelsFromEnv() (*LLMModels, error) {
 		buildCocoEntry(env),
 	}
 
+	// 加载配置文件中的模型
+	if env.LLMConfig != nil {
+		for _, m := range env.LLMConfig.Models {
+			entries = append(entries, buildFileModelEntry(m))
+		}
+	}
+
 	all := collectAvailableModels(entries)
-	current, err := selectModel(entries, env.LLMProvider)
+
+	desired := env.LLMProvider
+	if desired == "" && env.LLMConfig != nil && env.LLMConfig.Model.Name != "" {
+		desired = env.LLMConfig.Model.Name
+	}
+
+	current, err := selectModel(entries, desired)
 	if err != nil {
 		return &LLMModels{All: all}, err
 	}
 
 	return &LLMModels{All: all, Current: current}, nil
+}
+
+func buildFileModelEntry(m config.Model) modelEntry {
+	var cfg clientConfig
+	var client LLMClient
+
+	if m.Completions != nil {
+		cfg = clientConfig{
+			Alias:   m.Name,
+			Model:   m.Completions.Model,
+			BaseURL: m.Completions.BaseURL,
+			APIKey:  m.Completions.APIKey,
+			Timeout: defaultTimeout,
+		}
+		client = NewCompletionsClient(cfg)
+	} else if m.Claude != nil {
+		cfg = clientConfig{
+			Alias:   m.Name,
+			Model:   m.Claude.Model,
+			BaseURL: m.Claude.BaseURL,
+			APIKey:  m.Claude.APIKey,
+			Timeout: defaultTimeout,
+		}
+		// Claude 目前也尝试使用 CompletionsClient (OpenAI 兼容模式)
+		client = NewCompletionsClient(cfg)
+	} else if m.Responses != nil {
+		cfg = clientConfig{
+			Alias:   m.Name,
+			Model:   m.Responses.Model,
+			BaseURL: m.Responses.BaseURL,
+			APIKey:  m.Responses.APIKey,
+			Timeout: defaultTimeout,
+		}
+		// 使用 ResponsesClient
+		client = NewResponsesClient(cfg)
+	} else {
+		return modelEntry{alias: m.Name, err: fmt.Errorf("模型 %s 缺少配置内容", m.Name)}
+	}
+
+	return modelEntry{
+		alias:     cfg.Alias,
+		modelName: cfg.Model,
+		model:     modelFromConfig(cfg, client),
+	}
 }
 
 // NewLLMModelFromEnv 返回当前选择的模型。
@@ -163,7 +272,7 @@ func buildOpenAIEntry(env *config.Config) modelEntry {
 		APIKey:  apiKey,
 		Timeout: defaultTimeout,
 	}
-	client := &CompletionsClient{cfg: cfg, httpClient: newHTTPClient(cfg.Timeout)}
+	client := NewCompletionsClient(cfg)
 	return modelEntry{alias: cfg.Alias, modelName: modelName, model: modelFromConfig(cfg, client)}
 }
 
@@ -191,7 +300,7 @@ func buildKimiEntry(env *config.Config) modelEntry {
 		APIKey:  apiKey,
 		Timeout: defaultTimeout,
 	}
-	client := &CompletionsClient{cfg: cfg, httpClient: newHTTPClient(cfg.Timeout)}
+	client := NewCompletionsClient(cfg)
 	return modelEntry{alias: cfg.Alias, modelName: modelName, model: modelFromConfig(cfg, client)}
 }
 

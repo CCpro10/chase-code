@@ -231,6 +231,9 @@ func handleReplCommand(line string, pendingApprovalID string) (replDispatchResul
 		return replDispatchResult{quit: true}, nil
 	case "help":
 		return replDispatchResult{lines: replHelpLines()}, nil
+	case "model":
+		lines, err := handleModelCommand(cmd.args)
+		return replDispatchResult{lines: lines}, err
 	case "shell":
 		lines, err := handleShellCommand(cmd.args)
 		return replDispatchResult{lines: lines}, err
@@ -268,6 +271,55 @@ func parseReplCommand(line string) replCommand {
 		name: normalizeCommandName(fields[0]),
 		args: fields[1:],
 	}
+}
+
+// handleModelCommand 实现 /model 命令：
+//   - /model           显示所有可用模型及当前使用的模型；
+//   - /model <alias>   切换到指定别名的模型。
+func handleModelCommand(args []string) ([]string, error) {
+	sess, err := getOrInitReplAgent()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(args) == 0 {
+		models := llm.GetModels()
+		current := sess.session.Client
+		var currentAlias string
+		// 尝试从 client 获取 alias，如果 client 结构体中有的话
+		// 这里的实现依赖于 client 内部保存了别名，或者我们记录在 session 中
+		// 目前 LLMModel 中有 Alias，但 Client 接口没有返回 Alias 的方法。
+		// 我们暂且通过匹配 client 来判断，或者直接显示当前 session 的 client 信息。
+
+		lines := []string{"可用模型列表:"}
+		for _, m := range models {
+			prefix := "  "
+			// 简单的启发式判断：如果 client 内存地址一致，或者是同名的
+			if m.Client == current {
+				prefix = "* "
+				currentAlias = m.Alias
+			}
+			lines = append(lines, fmt.Sprintf("%s%s (%s)", prefix, m.Alias, m.Model))
+		}
+		if currentAlias != "" {
+			lines = append(lines, "", fmt.Sprintf("当前使用: %s", currentAlias))
+		}
+		return lines, nil
+	}
+
+	alias := args[0]
+	model, err := llm.FindModel(alias)
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := llm.NewLLMClient(model)
+	if err != nil {
+		return nil, err
+	}
+
+	sess.session.Client = client
+	return []string{fmt.Sprintf("已切换到模型: %s (%s)", model.Alias, model.Model)}, nil
 }
 
 // handleShellCommand 处理 /shell 命令。
@@ -378,6 +430,7 @@ func replHelpLines() []string {
 	return []string{`可用命令:
   /help                显示帮助
   /q / /quit / /exit   退出 repl
+  /model [alias]       查看或切换 LLM 模型
   /shell <cmd>         通过用户默认 shell 执行命令
   /agent <指令>        通过 LLM+工具自动完成一步任务
   /approve <id>        批准指定补丁请求（来自 apply_patch）

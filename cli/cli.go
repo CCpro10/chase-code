@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"chase-code/server/llm"
 	servertools "chase-code/server/tools"
 )
 
@@ -16,6 +17,12 @@ import (
 //   - 直接运行 `chase-code` 时，默认进入基于 agent 的 REPL；
 //   - 也可以通过子命令显式调用 shell/read/edit/repl。
 func Run() {
+	// 初始化 LLM 配置
+	if err := llm.Init(); err != nil {
+		fmt.Fprintf(os.Stderr, "初始化 LLM 失败: %v\n", err)
+		os.Exit(1)
+	}
+
 	if len(os.Args) < 2 {
 		// 无子命令时，默认进入 REPL（agent 优先）。
 		if err := runRepl(); err != nil {

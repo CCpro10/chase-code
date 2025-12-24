@@ -113,15 +113,30 @@ func (c *ResponsesClient) buildParams(p Prompt) responses.ResponseNewParams {
 	for _, it := range items {
 		switch it.Type {
 		case ResponseItemMessage:
-			inputItems = append(inputItems, responses.ResponseInputItemParamOfMessage(it.Text, responses.EasyInputMessageRole(it.Role)))
+			if it.Text != "" || it.Role == RoleUser {
+				inputItems = append(inputItems, responses.ResponseInputItemParamOfMessage(it.Text, responses.EasyInputMessageRole(it.Role)))
+			}
+			if it.Role == RoleAssistant && len(it.ToolCalls) > 0 {
+				for _, call := range it.ToolCalls {
+					inputItems = append(inputItems, responses.ResponseInputItemParamOfFunctionCall(
+						string(call.Arguments),
+						call.CallID,
+						call.ToolName,
+					))
+				}
+			}
+		case ResponseItemToolCall:
+			inputItems = append(inputItems, responses.ResponseInputItemParamOfFunctionCall(
+				string(it.ToolArguments),
+				it.CallID,
+				it.ToolName,
+			))
 		case ResponseItemToolResult:
 			if it.ToolName != "" || it.ToolOutput != "" {
-				inputItems = append(inputItems, responses.ResponseInputItemUnionParam{
-					OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
-						CallID: it.CallID,
-						Output: truncateToolOutput(it.ToolOutput),
-					},
-				})
+				inputItems = append(inputItems, responses.ResponseInputItemParamOfFunctionCallOutput(
+					it.CallID,
+					truncateToolOutput(it.ToolOutput),
+				))
 			}
 		}
 	}
