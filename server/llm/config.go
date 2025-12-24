@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	defaultTimeout       = 60 * time.Second
+	defaultTimeout       = 300 * time.Second
 	defaultOpenAIModel   = "gpt-4.1-mini"
 	defaultOpenAIBaseURL = "https://api.openai.com/v1"
 	defaultKimiModel     = "kimi-k2-0905-preview"
@@ -209,17 +209,16 @@ func buildCocoEntry(env *config.Config) modelEntry {
 		return modelEntry{alias: defaultAliasCoco, modelName: modelName, err: errors.New("缺少环境变量 cocojwtkey")}
 	}
 	cacheKey := strings.TrimSpace(env.CocoCacheKey)
-	if cacheKey == "" {
-		return modelEntry{alias: defaultAliasCoco, modelName: modelName, err: errors.New("缺少环境变量 cococachekey")}
-	}
 
 	cfg := clientConfig{
-		Alias:    defaultAliasCoco,
-		Model:    modelName,
-		BaseURL:  baseURL,
-		APIKey:   jwtKey,
-		CacheKey: cacheKey,
-		Timeout:  defaultTimeout,
+		Alias:   defaultAliasCoco,
+		Model:   modelName,
+		BaseURL: baseURL,
+		APIKey:  jwtKey,
+		Timeout: defaultTimeout,
+	}
+	if cacheKey != "" {
+		cfg.CacheKey = cacheKey
 	}
 	client := &ResponsesClient{cfg: cfg, httpClient: newHTTPClient(cfg.Timeout)}
 	return modelEntry{alias: cfg.Alias, modelName: modelName, model: modelFromConfig(cfg, client)}
