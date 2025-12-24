@@ -220,7 +220,7 @@ func buildCocoEntry(env *config.Config) modelEntry {
 	if cacheKey != "" {
 		cfg.CacheKey = cacheKey
 	}
-	client := &ResponsesClient{cfg: cfg, httpClient: newHTTPClient(cfg.Timeout)}
+	client := NewResponsesClient(cfg)
 	return modelEntry{alias: cfg.Alias, modelName: modelName, model: modelFromConfig(cfg, client)}
 }
 

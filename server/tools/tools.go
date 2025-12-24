@@ -39,16 +39,16 @@ var (
     },
     "timeout_ms": {
       "type": "integer",
-      "description": "超时时间（毫秒，可选，默认 60000）",
+      "description": "超时时间（毫秒）。建议值 60000。",
       "minimum": 1
     },
     "policy": {
       "type": "string",
-      "description": "命令权限策略：full=不限制；readonly=只读；workspace=仅允许当前工程目录",
+      "description": "权限策略：'workspace'=仅限工程目录；'readonly'=只读；'full'=无限制。建议默认 'workspace'。",
       "enum": ["full", "readonly", "workspace"]
     }
   },
-  "required": ["command"],
+  "required": ["command", "timeout_ms", "policy"],
   "additionalProperties": false
 }`)
 
@@ -61,11 +61,11 @@ var (
     },
     "max_bytes": {
       "type": "integer",
-      "description": "最大读取字节数（可选，不填则读取整个文件）",
+      "description": "最大读取字节数。建议值 524288 (512KB)。",
       "minimum": 1
     }
   },
-  "required": ["path"],
+  "required": ["path", "max_bytes"],
   "additionalProperties": false
 }`)
 
@@ -86,7 +86,7 @@ var (
   "properties": {
     "root": {
       "type": "string",
-      "description": "搜索的根目录路径"
+      "description": "搜索的起始目录（如 '.'）"
     },
     "pattern": {
       "type": "string",
@@ -94,11 +94,11 @@ var (
     },
     "max_matches": {
       "type": "integer",
-      "description": "最大匹配行数（可选）",
+      "description": "最大返回匹配行数。建议值 200。",
       "minimum": 1
     }
   },
-  "required": ["root", "pattern"],
+  "required": ["root", "pattern", "max_matches"],
   "additionalProperties": false
 }`)
 
@@ -111,18 +111,18 @@ var (
     },
     "from": {
       "type": "string",
-      "description": "待替换的原始字符串（必须能在文件中找到）"
+      "description": "待替换的唯一原始字符串片段"
     },
     "to": {
       "type": "string",
-      "description": "替换后的新字符串"
+      "description": "替换后的新字符串片段"
     },
     "all": {
       "type": "boolean",
-      "description": "是否替换文件中出现的所有 from；默认只允许唯一一次匹配"
+      "description": "是否替换所有匹配项。false 表示仅替换首个匹配（更安全），true 表示全部替换。"
     }
   },
-  "required": ["file", "from", "to"],
+  "required": ["file", "from", "to", "all"],
   "additionalProperties": false
 }`)
 )
