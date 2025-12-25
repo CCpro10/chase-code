@@ -125,7 +125,7 @@ func (c *ReplCommand) Description() string { return "进入交互式终端" }
 func (c *ReplCommand) Help() string        { return "用法: chase-code repl" }
 
 func (c *ReplCommand) Execute(ctx *CommandContext) CommandResult {
-	err := runRepl()
+	err := runRepl("")
 	return CommandResult{Error: err}
 }
 
@@ -169,6 +169,36 @@ func (c *ModelCommand) Execute(ctx *CommandContext) CommandResult {
 	}}
 }
 
+// ResumeCommand 实现 /resume 命令。
+type ResumeCommand struct{}
+
+func (c *ResumeCommand) Name() string        { return "resume" }
+func (c *ResumeCommand) Aliases() []string   { return nil }
+func (c *ResumeCommand) Description() string { return "列出或恢复已保存的会话" }
+func (c *ResumeCommand) Help() string {
+	return "用法: /resume [id]\n不带参数列出会话，带 ID 则恢复会话。"
+}
+
+func (c *ResumeCommand) Execute(ctx *CommandContext) CommandResult {
+	lines, err := handleResumeCommand(ctx.Args)
+	return CommandResult{Lines: lines, Error: err}
+}
+
+// CompactCommand 实现 /compact 命令。
+type CompactCommand struct{}
+
+func (c *CompactCommand) Name() string        { return "compact" }
+func (c *CompactCommand) Aliases() []string   { return nil }
+func (c *CompactCommand) Description() string { return "手动压缩当前会话上下文" }
+func (c *CompactCommand) Help() string {
+	return "用法: /compact\n生成当前会话摘要并压缩上下文以释放 Token。"
+}
+
+func (c *CompactCommand) Execute(ctx *CommandContext) CommandResult {
+	lines, err := handleCompactCommand(ctx.Args)
+	return CommandResult{Lines: lines, Error: err}
+}
+
 func init() {
 	Register(&ShellCommand{})
 	Register(&AgentCommand{})
@@ -179,4 +209,6 @@ func init() {
 	Register(&HelpCommand{})
 	Register(&ReplCommand{})
 	Register(&ModelCommand{})
+	Register(&ResumeCommand{})
+	Register(&CompactCommand{})
 }

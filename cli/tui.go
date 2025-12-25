@@ -27,6 +27,7 @@ type replModel struct {
 	streamBuffer        string
 	streamActive        bool
 	streamHeaderPrinted bool
+	initialInput        string
 
 	// 补全列表相关
 	showSuggestions bool
@@ -40,24 +41,28 @@ type replEventMsg struct {
 
 type replEventClosedMsg struct{}
 
+type replAutoRunMsg struct {
+	input string
+}
+
 type replDispatchMsg struct {
 	result replDispatchResult
 	err    error
 }
 
 // runReplTUI 启动基于 Bubble Tea 的交互终端（仅保留输入框渲染）。
-func runReplTUI(events <-chan server.Event) error {
+func runReplTUI(events <-chan server.Event, initialInput string) error {
 	if events == nil {
 		return fmt.Errorf("事件通道未初始化")
 	}
-	model := newReplModel(events)
+	model := newReplModel(events, initialInput)
 	program := tea.NewProgram(model)
 	_, err := program.Run()
 	return err
 }
 
 // newReplModel 构造 TUI 模型。
-func newReplModel(events <-chan server.Event) replModel {
+func newReplModel(events <-chan server.Event, initialInput string) replModel {
 	input := textinput.New()
 	input.Prompt = "chase> "
 	input.PromptStyle = stylePrompt
@@ -66,18 +71,25 @@ func newReplModel(events <-chan server.Event) replModel {
 	input.Focus()
 
 	return replModel{
-		input:  input,
-		events: events,
+		input:        input,
+		events:       events,
+		initialInput: initialInput,
 	}
 }
 
 // Init 启动事件监听、光标闪烁，并输出启动提示。
 func (m replModel) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		textinput.Blink,
 		listenForReplEvent(m.events),
 		printReplLinesCmd(replBannerLines()),
-	)
+	}
+	if m.initialInput != "" {
+		cmds = append(cmds, func() tea.Msg {
+			return replAutoRunMsg{input: m.initialInput}
+		})
+	}
+	return tea.Batch(cmds...)
 }
 
 // Update 处理输入、事件与窗口尺寸变化。
@@ -130,6 +142,12 @@ func (m replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 	case replEventClosedMsg:
 		return m, printReplLinesCmd([]string{styleDim.Render("[event] 通道已关闭")})
+	case replAutoRunMsg:
+		echo := []string{styleUser.Render("> " + msg.input)}
+		return m, tea.Batch(
+			printReplLinesCmd(echo),
+			replDispatchCmd(msg.input, m.pendingApprovalID),
+		)
 	case replDispatchMsg:
 		return m.handleDispatch(msg)
 	}

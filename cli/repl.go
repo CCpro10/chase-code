@@ -12,6 +12,7 @@ import (
 	"chase-code/config"
 	"chase-code/server"
 	"chase-code/server/llm"
+	"chase-code/server/persistence"
 	servertools "chase-code/server/tools"
 )
 
@@ -149,9 +150,9 @@ func initToolRouter() ([]servertools.ToolSpec, *servertools.ToolRouter) {
 	return tools, router
 }
 
-func runRepl() error {
+func runRepl(initialInput string) error {
 	events := getReplEvents()
-	return runReplTUI(events)
+	return runReplTUI(events, initialInput)
 }
 
 func isAllowedWhileAgentRunning(line string) bool {
@@ -239,6 +240,12 @@ func handleReplCommand(line string, pendingApprovalID string) (replDispatchResul
 		return replDispatchResult{lines: lines}, err
 	case "agent":
 		return replDispatchResult{}, handleAgentCommand(cmd.args)
+	case "resume":
+		lines, err := handleResumeCommand(cmd.args)
+		return replDispatchResult{lines: lines}, err
+	case "compact":
+		lines, err := handleCompactCommand(cmd.args)
+		return replDispatchResult{lines: lines}, err
 	case "approvals":
 		lines, err := handleApprovalsCommand(cmd.args)
 		return replDispatchResult{lines: lines}, err
@@ -343,6 +350,63 @@ func handleAgentCommand(args []string) error {
 	return startAgentTurn(rest)
 }
 
+// handleResumeCommand 处理 /resume 命令。
+func handleResumeCommand(args []string) ([]string, error) {
+	sess, err := getOrInitReplAgent()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(args) == 0 {
+		ids, err := persistence.List()
+		if err != nil {
+			return nil, fmt.Errorf("列出会话失败: %v", err)
+		}
+		if len(ids) == 0 {
+			return []string{"当前没有已保存的会话"}, nil
+		}
+		lines := []string{"可用会话列表 (使用 /resume <id> 加载):"}
+		// 倒序显示，最新的在最前 (List 返回的是文件名排序，假设 ID 时间戳递增)
+		for i := len(ids) - 1; i >= 0; i-- {
+			lines = append(lines, fmt.Sprintf("- %s", ids[i]))
+		}
+		return lines, nil
+	}
+
+	id := args[0]
+	if err := sess.session.LoadHistory(id); err != nil {
+		return nil, fmt.Errorf("加载会话失败: %v", err)
+	}
+	return []string{fmt.Sprintf("已加载会话: %s", id)}, nil
+}
+
+// handleCompactCommand 处理 /compact 命令。
+func handleCompactCommand(args []string) ([]string, error) {
+	sess, err := getOrInitReplAgent()
+	if err != nil {
+		return nil, err
+	}
+
+	// 发送思考事件以在界面上展示状态（如果支持）
+	sess.session.Sink.SendEvent(server.Event{
+		Kind: server.EventAgentThinking,
+		Time: time.Now(),
+	})
+
+	summary, err := sess.session.ManualCompactHistory(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("压缩失败: %v", err)
+	}
+
+	return []string{
+		"上下文压缩成功！",
+		"摘要内容:",
+		"---",
+		summary,
+		"---",
+	}, nil
+}
+
 // handleApprovalCommand 处理 /approve、/reject 命令。
 func handleApprovalCommand(args []string, approved bool) ([]string, error) {
 	if len(args) != 1 {
@@ -433,6 +497,8 @@ func replHelpLines() []string {
   /model [alias]       查看或切换 LLM 模型
   /shell <cmd>         通过用户默认 shell 执行命令
   /agent <指令>        通过 LLM+工具自动完成一步任务
+  /resume [id]         列出或恢复已保存的会话
+  /compact             手动压缩当前会话上下文（释放 Token）
   /approve <id>        批准指定补丁请求（来自 apply_patch）
   /reject <id>         拒绝指定补丁请求
   /approvals           查看/设置 apply_patch 审批模式

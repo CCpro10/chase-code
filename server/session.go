@@ -5,17 +5,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"strings"
 	"time"
 
 	"chase-code/server/config"
 	"chase-code/server/llm"
+	"chase-code/server/persistence"
+	"chase-code/server/prompt"
 	servertools "chase-code/server/tools"
 )
 
 // Session 封装了一次基于 LLM+工具的对话会话（类似 codex-rs 的 Session），
 // 负责驱动多轮 LLM 调用和工具调用，并通过 EventSink 将关键步骤发送给上层（如 CLI）。
 type Session struct {
+	ID       string
 	Client   llm.LLMClient
 	Router   *servertools.ToolRouter
 	Sink     EventSink
@@ -43,6 +47,7 @@ func NewSession(client llm.LLMClient, router *servertools.ToolRouter, sink Event
 	}
 	cfg := config.DefaultSessionConfigFromEnv()
 	return &Session{
+		ID:        newSessionID(),
 		Client:    client,
 		Router:    router,
 		Sink:      sink,
@@ -50,6 +55,26 @@ func NewSession(client llm.LLMClient, router *servertools.ToolRouter, sink Event
 		Config:    cfg,
 		approvals: make(chan ApprovalDecision, 1),
 	}
+}
+
+// LoadHistory 从持久化存储加载历史记录。
+func (s *Session) LoadHistory(id string) error {
+	history, err := persistence.Load(id)
+	if err != nil {
+		return err
+	}
+	s.history = history
+	s.ID = id // 切换到该会话 ID
+	log.Printf("[session] loaded history for session %s (items=%d)", id, len(history))
+	return nil
+}
+
+func newSessionID() string {
+	now := time.Now()
+	datePart := now.Format("20060102-150405")
+	rnd := rand.New(rand.NewSource(now.UnixNano()))
+	randPart := rnd.Intn(10000)
+	return fmt.Sprintf("%s-%04d", datePart, randPart)
 }
 
 // ApprovalsChan 返回一个写端通道，供 CLI 将用户审批结果写回。
@@ -136,6 +161,9 @@ func (s *Session) commitHistory(cm *ContextManager) {
 		return
 	}
 	s.history = cm.History()
+	if err := persistence.Save(s.ID, s.history); err != nil {
+		log.Printf("[session] failed to save session %s: %v", s.ID, err)
+	}
 }
 
 // resolveMaxSteps 确保最大步数始终是一个可用的正数。
@@ -596,52 +624,75 @@ func (s *Session) waitForApproval(ctx context.Context, requestID string) (bool, 
 	}
 }
 
-// BuildToolSystemPrompt 基于工具列表构造一段 system prompt，
-// 主要用于提示模型如何安全、高效地使用这些 function tools。
-// 注意：工具调用通过 OpenAI function calling 完成，模型不需要、也不应该在 message
-// 内容中手写任何 JSON 工具调用；只需要在内部决定是否调用某个工具即可。
-func BuildToolSystemPrompt(tools []servertools.ToolSpec) string {
-	var b strings.Builder
-
-	// 角色与目标
-	b.WriteString("你是 chase-code 的本地代码助手，运行在用户的工作目录中，可以调用工具帮助用户完成开发任务。\n")
-	b.WriteString("你的目标是：在保证安全和谨慎修改代码的前提下，尽量自动完成用户的开发任务，并用中文解释你的思路。\n\n")
-
-	// 工具使用总原则
-	b.WriteString("=== 工具使用总原则 ===\n\n")
-	b.WriteString("- 你可以通过“函数调用（function calling）”的方式使用下列工具。\n")
-	b.WriteString("- 工具调用由系统根据 tools 定义触发，你不需要在回复中手写 JSON。\n")
-	b.WriteString("- 在给用户的回复中，禁止输出任何表示工具调用的 JSON 结构或工具名+参数的伪代码。\n")
-	b.WriteString("- 你的 message 内容只面向用户，应该是自然语言解释、结论和后续计划。\n\n")
-
-	b.WriteString("在决定是否调用工具时，请先思考：\n")
-	b.WriteString("1. 当前还缺少什么信息？\n")
-	b.WriteString("2. 哪个工具最适合获取这些信息或修改代码？\n")
-
-	b.WriteString("=== 工具选择建议 ===\n\n")
-	b.WriteString("- 想了解项目结构 → 优先使用 list_dir 或 grep_files。\n")
-	b.WriteString("- 想阅读/理解某个文件 → 使用 read_file。\n")
-	b.WriteString("- 想做小范围修改 → 使用 apply_patch，修改前尽量先 read_file 确认上下文。\n")
-	b.WriteString("- 想执行命令（如 go test / go build）→ 使用 shell，但要避免危险命令（删除系统文件、格式化磁盘等）。\n")
-	b.WriteString("- 执行工具后、继续根据用户需求，选择其他工具、直到完成用户的任务。\n\n")
-
-	// 工具列表（给模型一个清晰的总览）
-	b.WriteString("=== 可用工具列表（名称 / 描述 ） ===\n")
-	for i, t := range tools {
-		params := strings.TrimSpace(string(t.Parameters))
-		if params == "" {
-			params = "{}"
-		}
-		fmt.Fprintf(&b, "%d. %s — %s\n   \n", i+1, t.Name, t.Description)
+// ManualCompactHistory 手动触发上下文压缩。
+// 会调用 LLM 生成摘要，并用摘要替换当前历史记录（保留 System Prompt）。
+func (s *Session) ManualCompactHistory(ctx context.Context) (string, error) {
+	if len(s.history) <= 2 {
+		return "历史记录太短，无需压缩", nil
 	}
-	b.WriteString("\n")
 
-	b.WriteString("=== 回复风格要求 ===\n\n")
-	b.WriteString("- 始终用中文回复。\n")
-	b.WriteString("- 当你使用了工具时，在给用户的自然语言回答中，\n  可以用一两句话概括你刚才做了什么（例如：‘我刚才用 read_file 看了 main.go 的内容’）。\n")
-	b.WriteString("- 不要在自然语言中暴露底层的函数名、JSON 结构或完整参数，只描述你做过的动作和结论。\n")
-	b.WriteString("- 如果需要用户决策（例如选择某种改动方案），先列出备选方案及利弊，让用户选择。\n")
-	b.WriteString("- 可以多次调用工具、直到完成用户任务。\n")
+	start := time.Now()
+	log.Printf("[session] starting manual compaction items=%d", len(s.history))
 
-	return b.String()
+	// 1. 构造摘要生成的 Prompt
+	// 使用当前的完整历史，但追加一条 Summarization Prompt
+	cm := NewContextManager(s.history)
+	cm.Record(ResponseItem{
+		Type: ResponseItemMessage,
+		Role: RoleUser,
+		Text: prompt.GetCompactPrompt(),
+	})
+
+	compactPrompt := Prompt{
+		Messages: cm.BuildPromptMessages(),
+		// 摘要任务通常不需要 Tools，减少 Token 消耗
+		Items: cm.History(),
+	}
+
+	// 2. 调用 LLM 生成摘要 (非流式)
+	res, err := s.Client.Complete(ctx, compactPrompt)
+	if err != nil {
+		return "", fmt.Errorf("生成摘要失败: %w", err)
+	}
+	summary := res.Message.Content
+	log.Printf("[session] compaction summary generated len=%d elapsed=%s", len(summary), time.Since(start))
+
+	// 3. 重建历史
+	var newHistory []ResponseItem
+
+	// 3.1 保留 System Prompt
+	if len(s.history) > 0 && s.history[0].Role == RoleSystem {
+		newHistory = append(newHistory, s.history[0])
+	} else {
+		// 理论上应该有，如果没有就补一个默认的或者跳过
+	}
+
+	// 3.2 插入摘要作为 User Message (参考 Codex 逻辑，或者 System Message)
+	// 为了让 LLM 明确知道这是历史摘要，我们加个前缀
+	summaryMsg := fmt.Sprintf("这是之前对话的历史摘要（Context Compacted）：\n\n%s", summary)
+	newHistory = append(newHistory, ResponseItem{
+		Type: ResponseItemMessage,
+		Role: RoleUser, // 或者 RoleSystem，视模型偏好而定。RoleUser 通常比较稳妥，像用户提供了背景。
+		Text: summaryMsg,
+	})
+
+	// 3.3 替换当前历史
+	s.history = newHistory
+
+	// 3.4 立即持久化
+	if err := persistence.Save(s.ID, s.history); err != nil {
+		log.Printf("[session] failed to save compacted session: %v", err)
+	}
+
+	return summary, nil
+}
+
+// BuildToolSystemPrompt 基于工具列表构造一段 system prompt。
+func BuildToolSystemPrompt(tools []servertools.ToolSpec) string {
+	s, err := prompt.BuildSystemPrompt(tools)
+	if err != nil {
+		log.Printf("加载 System Prompt 失败: %v，使用简易回退", err)
+		return "System prompt load failed."
+	}
+	return s
 }

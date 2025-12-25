@@ -25,7 +25,7 @@ func Run() {
 
 	if len(os.Args) < 2 {
 		// 无子命令时，默认进入 REPL（agent 优先）。
-		if err := runRepl(); err != nil {
+		if err := runRepl(""); err != nil {
 			fmt.Fprintf(os.Stderr, "repl 退出: %v\n", err)
 			os.Exit(1)
 		}
@@ -40,16 +40,26 @@ func Run() {
 			os.Exit(1)
 		}
 	case "repl":
-		if err := runRepl(); err != nil {
+		if err := runRepl(""); err != nil {
 			fmt.Fprintf(os.Stderr, "repl 退出: %v\n", err)
 			os.Exit(1)
 		}
 	case "help", "-h", "--help":
 		usage()
 	default:
-		fmt.Fprintf(os.Stderr, "未知子命令: %s\n\n", cmd)
-		usage()
-		os.Exit(1)
+		// 如果看起来像 flag，还是报错
+		if strings.HasPrefix(cmd, "-") {
+			fmt.Fprintf(os.Stderr, "未知子命令: %s\n\n", cmd)
+			usage()
+			os.Exit(1)
+		}
+
+		// 否则视为直接提问
+		initialInput := strings.Join(os.Args[1:], " ")
+		if err := runRepl(initialInput); err != nil {
+			fmt.Fprintf(os.Stderr, "repl 退出: %v\n", err)
+			os.Exit(1)
+		}
 	}
 }
 
