@@ -7,126 +7,65 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestCommonPrefixLength(t *testing.T) {
+// streamLinesForTest 模拟流式渲染输出并返回去除 ANSI 的行。
+func streamLinesForTest(deltas []string, width int) []string {
+	m := &replModel{
+		streamWrapWidth: width,
+	}
+	var out []string
+	for _, delta := range deltas {
+		out = append(out, m.appendStreamDelta(delta)...)
+	}
+	out = append(out, m.flushStreamFinal("")...)
+	return normalizeStreamTestLines(out)
+}
+
+// fullLinesForTest 渲染完整 Markdown 并返回去除 ANSI 的行。
+func fullLinesForTest(input string, width int) []string {
+	rendered := renderMarkdownToANSI(input, width)
+	return normalizeStreamTestLines(splitLines(rendered))
+}
+
+// normalizeStreamTestLines 统一清理测试行，保证对比一致。
+func normalizeStreamTestLines(lines []string) []string {
+	cleaned := sanitizeLines(lines)
+	out := make([]string, 0, len(cleaned))
+	for _, line := range cleaned {
+		out = append(out, stripANSI(line))
+	}
+	return out
+}
+
+func TestStreamMarkdownMatchesFullRender(t *testing.T) {
 	cases := []struct {
-		name     string
-		a, b     []string
-		expected int
+		name   string
+		deltas []string
 	}{
 		{
-			name:     "empty slices",
-			a:        []string{},
-			b:        []string{},
-			expected: 0,
+			name:   "plain_no_newline",
+			deltas: []string{"Hello, world"},
 		},
 		{
-			name:     "identical slices",
-			a:        []string{"a", "b"},
-			b:        []string{"a", "b"},
-			expected: 2,
+			name:   "heading_after_paragraph",
+			deltas: []string{"Hello.\n", "## Heading\n"},
 		},
 		{
-			name:     "b extends a",
-			a:        []string{"a", "b"},
-			b:        []string{"a", "b", "c"},
-			expected: 2,
+			name:   "list_split",
+			deltas: []string{"- a\n- ", "b\n- c\n"},
 		},
 		{
-			name:     "a extends b",
-			a:        []string{"a", "b", "c"},
-			b:        []string{"a", "b"},
-			expected: 2,
-		},
-		{
-			name:     "prefix match only",
-			a:        []string{"a", "b", "c"},
-			b:        []string{"a", "b", "d"},
-			expected: 2,
-		},
-		{
-			name:     "no match",
-			a:        []string{"a", "b"},
-			b:        []string{"c", "d"},
-			expected: 0,
-		},
-		{
-			name: "b modifies a suffix (margin case)",
-			a:    []string{"Item 1", ""},           // Old state: item + margin
-			b:    []string{"Item 1", "Item 2", ""}, // New state: item 1 + item 2 + margin
-			// Here "Item 1" matches. The second element "" != "Item 2".
-			expected: 1,
+			name:   "fenced_code",
+			deltas: []string{"```", "\ncode 1\ncode 2\n", "```\n"},
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			actual := commonPrefixLength(tc.a, tc.b)
-			assert.Equal(t, tc.expected, actual)
+			fullInput := strings.Join(tc.deltas, "")
+			full := fullLinesForTest(fullInput, 80)
+			streamed := streamLinesForTest(tc.deltas, 80)
+			assert.Equal(t, full, streamed)
 		})
-	}
-}
-
-// Mocking renderMarkdownToANSI behavior for deterministic testing
-// In reality, this function calls glamour which might output ANSI codes.
-// For logic testing, we assume stableRaw -> renderedLines mapping is predictable.
-func mockRender(raw string) []string {
-	// A simple mock that simulates lists adding items and potentially shifting margins.
-	// Scenario:
-	// "1. Item 1" -> ["Item 1", ""] (margin)
-	// "1. Item 1\n2. Item 2" -> ["Item 1", "Item 2", ""]
-
-	lines := strings.Split(raw, "\n")
-	var rendered []string
-	for _, l := range lines {
-		if strings.TrimSpace(l) == "" {
-			continue
-		}
-		rendered = append(rendered, l)
-	}
-	// simulate glamour adding a bottom margin if content exists
-	if len(rendered) > 0 {
-		rendered = append(rendered, "")
-	}
-	return rendered
-}
-
-func TestReplModel_StreamLogic_Simulation(t *testing.T) {
-	// Setup a model with mock state
-	m := &replModel{
-		streamActive:    true,
-		streamWrapWidth: 80,
-	}
-
-	// This test bypasses the actual renderMarkdownToANSI and directly tests the logic
-	// of appendStreamDelta by manually manipulating the state as if render happened.
-	// Since we can't easily inject the renderer into replModel without refactoring,
-	// we will replicate the critical logic here or rely on the actual renderer if it's stable enough.
-	// Given we want to verify the FIX (commonPrefixLength usage), let's construct the scenario manually.
-
-	// Step 1: Initial state
-	// Rendered: Item 1 + Margin
-	m.streamRenderedLines = []string{"Item 1", ""}
-
-	// Step 2: New Content arrives
-	// New Render Result: Item 1 + Item 2 + Margin
-	newLines := []string{"Item 1", "Item 2", ""}
-
-	// Calculate delta using the fixed logic
-	commonLen := commonPrefixLength(m.streamRenderedLines, newLines)
-	assert.Equal(t, 1, commonLen, "Should match 'Item 1'")
-
-	newOutput := newLines[commonLen:]
-	assert.Equal(t, []string{"Item 2", ""}, newOutput, "Should output Item 2 and new Margin")
-
-	// Step 3: Update state
-	m.streamRenderedLines = newLines
-
-	// Step 4: Verify repeated update doesn't output duplicates
-	// Same content again
-	commonLen2 := commonPrefixLength(m.streamRenderedLines, newLines)
-	assert.Equal(t, 3, commonLen2, "Should match all lines")
-	if commonLen2 < len(newLines) {
-		t.Errorf("Should not output anything, but got %v", newLines[commonLen2:])
 	}
 }
 
@@ -148,4 +87,54 @@ func TestSanitizeLines(t *testing.T) {
 	// "Line 3" -> ["Line 3"]
 	expected := []string{"Line 1", "Line 2", "", "Line 3"}
 	assert.Equal(t, expected, output2)
+}
+
+// TestSanitizeLines_StripANSI 验证 sanitizeLines 是否能识别仅包含 ANSI 码的行并将其视为空行处理。
+func TestSanitizeLines_StripANSI(t *testing.T) {
+	// 模拟场景：
+	// renderMarkdownToANSI 产生了一些包含颜色重置码的行，虽然视觉上是空行，但字符串不为空。
+	input := []string{
+		"Line 1",
+		"\x1b[0m",       // ANSI reset code, visually empty
+		"   \x1b[0m   ", // spaces + ANSI, visually empty
+		"",
+		"Line 2",
+	}
+
+	// 我们期望 sanitizeLines 能识别出中间那些都是空行，并压缩为一个空行。
+	expected := []string{
+		"Line 1",
+		"",
+		"Line 2",
+	}
+
+	actual := sanitizeLines(input)
+
+	// 在目前的实现中（未修复前），这可能会失败。
+	// 我们先看看现在的行为。
+	// 如果失败，我们再修复。
+	assert.Equal(t, expected, actual)
+}
+
+func TestSanitizeLines_ComplexANSI(t *testing.T) {
+	input := []string{
+		"Start",
+		"\x1b[0m",    // CSI: Reset
+		"\x1b[1;31m", // CSI: Bold Red
+		"\x1b(B",     // G0 Set (not matched by simple CSI regex)
+		"\x1b[?25h",  // CSI: Show Cursor (private mode)
+		"End",
+	}
+
+	// 如果我们的正则只匹配 CSI，那么 \x1b(B 就会被残留下来，导致非空判断。
+	// 我们期望这些都被视为 "视觉空行"。
+	expected := []string{
+		"Start",
+		"",
+		"End",
+	}
+
+	actual := sanitizeLines(input)
+	// 如果这里失败，说明正则需要改进
+	assert.Equal(t, expected, actual)
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -18,16 +19,14 @@ const (
 
 // replModel 负责管理 TUI 的状态与渲染。
 type replModel struct {
-	input               textinput.Model
-	events              <-chan server.Event
-	pendingApprovalID   string
-	exiting             bool
-	width               int
-	height              int
-	streamBuffer        string
-	streamActive        bool
-	streamHeaderPrinted bool
-	initialInput        string
+	input             textinput.Model
+	events            <-chan server.Event
+	pendingApprovalID string
+	exiting           bool
+	width             int
+	height            int
+	streamActive      bool
+	initialInput      string
 
 	// 补全列表相关
 	showSuggestions bool
@@ -35,8 +34,9 @@ type replModel struct {
 	suggestionIdx   int
 
 	// 流式 Markdown 渲染状态
-	streamRenderedLines []string // 已输出的渲染行缓存
-	streamWrapWidth     int
+	streamBuffer             string // 原始流式 Markdown 累积内容
+	streamCommittedLineCount int    // 已提交的渲染行数
+	streamWrapWidth          int
 }
 
 type replEventMsg struct {
@@ -371,92 +371,7 @@ func (m *replModel) applyEvent(ev server.Event) []string {
 	return formatEvent(ev)
 }
 
-// popSafeChunk 从 buffer 中提取可以安全渲染的完整段落（以双换行结束）。
-// 如果在代码块内，则忽略双换行，直到代码块闭合。
-// 返回 extracted chunk (包含结尾换行) 和 remaining buffer。
-func popSafeChunk(buffer string) (string, string) {
-	if buffer == "" {
-		return "", ""
-	}
-
-	idx := 0
-	inFence := false
-
-	// 简单的状态机扫描
-	// 我们寻找不在 fence 内的 \n\n 序列
-	length := len(buffer)
-	lastSafeEnd := -1
-
-	for idx < length {
-		// 检查 fence
-		// 必须是行首，或者前一个字符是 \n
-		isLineStart := (idx == 0) || (buffer[idx-1] == '\n')
-		if isLineStart && strings.HasPrefix(buffer[idx:], "```") {
-			// 确定这是否真的是 fence 行
-			// 找到这一行的结束
-			lineEnd := strings.IndexByte(buffer[idx:], '\n')
-			if lineEnd == -1 {
-				// 这一行还没写完，肯定不能 split，直接跳出循环等待更多输入
-				break
-			}
-
-			// 这是一个完整的 fence 行
-			if !inFence {
-				inFence = true
-			} else {
-				inFence = false
-			}
-			idx += lineEnd + 1
-			continue
-		}
-
-		if inFence {
-			// 在 fence 内，直接跳到下一行
-			lineEnd := strings.IndexByte(buffer[idx:], '\n')
-			if lineEnd == -1 {
-				break
-			}
-			idx += lineEnd + 1
-			continue
-		}
-
-		// 不在 fence 内，检查是否是双换行
-		// 我们的目标是找到 \n\n
-		// 注意：idx 目前指向行首（或者某行的开始）
-		// 如果 buffer[idx] 是 \n，且 buffer[idx-1] 也是 \n (由于循环逻辑，我们其实是在寻找连续的换行)
-
-		// 让我们简化逻辑：直接查找 \n\n
-		// 从当前 idx 开始找
-		nextNL := strings.IndexByte(buffer[idx:], '\n')
-		if nextNL == -1 {
-			break
-		}
-
-		// 找到了一个换行
-		nlPos := idx + nextNL
-
-		// 检查这个换行之后是否紧接着另一个换行
-		// 注意：如果是 Windows 的 \r\n，这里可能需要更复杂的逻辑。
-		// 但 glamour/bubbletea 通常处理 LF。
-		// 检查 nlPos+1 是否也是 \n
-		if nlPos+1 < length && buffer[nlPos+1] == '\n' {
-			// 这是一个段落边界
-			// chunk 应该包含这个边界
-			lastSafeEnd = nlPos + 2 // include \n\n
-			idx = lastSafeEnd
-			continue // 继续找，贪婪匹配？不，我们流式输出，找到一个就可以输出了，减少延迟
-			// 但为了性能，可以一次输出多个段落?
-			// 这里我们返回找到的第一个段落即可
-			return buffer[:lastSafeEnd], buffer[lastSafeEnd:]
-		}
-
-		idx = nlPos + 1
-	}
-
-	return "", buffer
-}
-
-// appendStreamDelta 追加流式增量并输出已完成的块。
+// appendStreamDelta 追加流式增量并输出已完成的完整行。
 func (m *replModel) appendStreamDelta(delta string) []string {
 	if delta == "" {
 		return nil
@@ -467,34 +382,40 @@ func (m *replModel) appendStreamDelta(delta string) []string {
 		m.streamWrapWidth = m.resolveStreamWrapWidth()
 	}
 
-	var output []string
-
-	for {
-		chunk, remaining := popSafeChunk(m.streamBuffer)
-		if chunk == "" {
-			break
-		}
-
-		// 渲染这个 chunk
-		rendered := renderMarkdownToANSI(chunk, m.streamWrapWidth)
-
-		// 清理渲染结果的首尾空行，避免块之间叠加过大的 margin
-		rendered = strings.TrimSpace(rendered)
-		if rendered != "" {
-			// 在输出前，我们需要决定是否加换行。
-			// 因为 popSafeChunk 是按段落切的，段落之间应该有空行。
-			// 但 glamour 可能已经在内部渲染了边距。
-			// 策略：输出 rendered 后，再手动 append 一个空行，模拟段落间距。
-			// 注意：splitLines 会把字符串切成行数组
-			lines := splitLines(rendered)
-			output = append(output, lines...)
-			output = append(output, "") // 段落间距
-		}
-
-		m.streamBuffer = remaining
+	if !strings.Contains(delta, "\n") {
+		return nil
 	}
 
-	return output
+	return m.streamCommitCompleteLines()
+}
+
+// streamCommitCompleteLines 渲染到最后一个换行符并提交新增完整行。
+// 该策略参考 codex-rs 的流式 Markdown 处理方式，避免输出未稳定的行。
+func (m *replModel) streamCommitCompleteLines() []string {
+	lastNewline := strings.LastIndex(m.streamBuffer, "\n")
+	if lastNewline == -1 {
+		return nil
+	}
+
+	source := m.streamBuffer[:lastNewline+1]
+	rendered := renderMarkdownToANSI(source, m.streamWrapWidth)
+	lines := splitLines(rendered)
+	if len(lines) == 0 {
+		return nil
+	}
+
+	completeLineCount := len(lines)
+	if completeLineCount > 0 && isVisualEmptyLine(lines[completeLineCount-1]) {
+		completeLineCount--
+	}
+
+	if m.streamCommittedLineCount >= completeLineCount {
+		return nil
+	}
+
+	out := lines[m.streamCommittedLineCount:completeLineCount]
+	m.streamCommittedLineCount = completeLineCount
+	return out
 }
 
 // flushStreamFinal 在流式结束时渲染并输出剩余部分。
@@ -512,22 +433,25 @@ func (m *replModel) flushStreamFinal(final string) []string {
 		return nil
 	}
 
-	rendered := renderMarkdownToANSI(m.streamBuffer, m.streamWrapWidth)
-	rendered = strings.TrimSpace(rendered)
+	source := m.streamBuffer
+	if !strings.HasSuffix(source, "\n") {
+		source += "\n"
+	}
 
-	if rendered == "" {
+	rendered := renderMarkdownToANSI(source, m.streamWrapWidth)
+	lines := splitLines(rendered)
+	if len(lines) == 0 || m.streamCommittedLineCount >= len(lines) {
 		return nil
 	}
 
-	return splitLines(rendered)
+	return lines[m.streamCommittedLineCount:]
 }
 
 // resetStreamState 清理流式输出状态，避免跨事件残留。
 func (m *replModel) resetStreamState() {
 	m.streamBuffer = ""
 	m.streamActive = false
-	m.streamHeaderPrinted = false
-	m.streamRenderedLines = nil
+	m.streamCommittedLineCount = 0
 	m.streamWrapWidth = 0
 }
 
@@ -603,22 +527,51 @@ func inputBoxContentWidth(totalWidth int) int {
 func sanitizeLines(lines []string) []string {
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
+		var parts []string
 		// 保留显式的空行（防止被 splitLines 吞掉）
 		if line == "" {
-			out = append(out, "")
-			continue
+			parts = []string{""}
+		} else {
+			parts = splitLines(line)
+			// 如果 line 非空但 parts 为空（例如仅包含换行符），也视为空行保留
+			if len(parts) == 0 {
+				parts = []string{""}
+			}
 		}
-		parts := splitLines(line)
-		// 如果 line 非空但 parts 为空（例如仅包含换行符），也视为空行保留
-		if len(parts) == 0 {
-			out = append(out, "")
-			continue
-		}
+
 		for _, part := range parts {
-			out = append(out, sanitizeLine(part))
+			s := sanitizeLine(part)
+
+			// 检查是否为视觉空行（去除 ANSI 码后为空）
+			isVisualEmpty := isVisualEmptyLine(s)
+
+			// 压缩连续空行
+			if isVisualEmpty {
+				// 强制将其视为空字符串处理，避免残留仅含 ANSI 码的行占据高度
+				s = ""
+				if len(out) > 0 && out[len(out)-1] == "" {
+					continue
+				}
+			}
+			out = append(out, s)
 		}
 	}
 	return out
+}
+
+// ansiRegex 匹配常见的 ANSI 转义序列
+// 包括 CSI (如 \x1b[0m, \x1b[?25h) 和 G0/G1 charset (如 \x1b(B)
+var ansiRegex = regexp.MustCompile("\x1b\\[[0-9;?]*[a-zA-Z]|\x1b\\([0-9A-Za-z]")
+
+// stripANSI 移除字符串中的 ANSI 转义序列。
+func stripANSI(s string) string {
+	return ansiRegex.ReplaceAllString(s, "")
+}
+
+// isVisualEmptyLine 判断一行在去除 ANSI 转义后是否为空白。
+func isVisualEmptyLine(line string) bool {
+	stripped := stripANSI(line)
+	return strings.TrimSpace(stripped) == ""
 }
 
 // sanitizeLine 移除 \r 等控制字符，避免破坏终端输出。
