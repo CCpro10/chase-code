@@ -33,6 +33,11 @@ type replModel struct {
 	showSuggestions bool
 	suggestions     []CLICommand
 	suggestionIdx   int
+
+	// 流式 Markdown 渲染状态
+	streamStableRaw     string
+	streamRenderedLines []string // 已输出的渲染行缓存
+	streamWrapWidth     int
 }
 
 type replEventMsg struct {
@@ -156,6 +161,89 @@ func (m replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.input, cmd = m.input.Update(msg)
 	m.updateSuggestions()
 	return m, cmd
+}
+
+func (m replModel) resolveStreamWrapWidth() int {
+	// 使用首次进入流式时的宽度，避免窗口变化导致渲染不稳定（会破坏增量前缀判断）。
+	if m.streamWrapWidth > 0 {
+		return m.streamWrapWidth
+	}
+	// 经验值：按终端宽度换行；没有窗口尺寸时回退 80。
+	if m.width > 0 {
+		w := m.width
+		if w < 20 {
+			w = 20
+		}
+		return w
+	}
+	return 80
+}
+
+// splitStableMarkdown 将输入切分为“可稳定渲染”的前缀 + 仍可能变化的尾部。
+// 目标：在不破坏 Markdown 结构的前提下，尽可能流式输出。
+//
+// 稳定边界策略（启发式）：
+// - 仅在“完整行”边界输出（必须以 \n 结尾），避免半行导致渲染抖动。
+// - fenced code block（```）必须完整闭合后才输出整个代码块（包含开关 fence 行）。
+// - 普通段落行可能因后续内容导致换行重排，默认只在“空行/标题/列表/引用/分割线”等更稳定的行后推进。
+func splitStableMarkdown(raw string) (stable string, tail string) {
+	if raw == "" {
+		return "", ""
+	}
+
+	inFence := false
+	fenceStart := -1
+	lastSafeIdx := 0
+	idx := 0
+
+	// 非 fenced code block：为了避免 glamour 因后续内容导致重排（reflow），
+	// 我们采取更保守的策略：仅在“空行”后推进输出。
+	// 这样会牺牲部分即时性，但可以显著减少重复渲染。
+	isStableLine := func(trimmed string) bool {
+		return trimmed == ""
+	}
+
+	for idx < len(raw) {
+		nl := strings.IndexByte(raw[idx:], '\n')
+		if nl == -1 {
+			break
+		}
+		lineStart := idx
+		lineEnd := idx + nl + 1
+		line := raw[lineStart:lineEnd]
+		idx = lineEnd
+
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			if !inFence {
+				inFence = true
+				fenceStart = lineStart
+				continue
+			}
+			inFence = false
+			fenceStart = -1
+			lastSafeIdx = lineEnd
+			continue
+		}
+		if inFence {
+			continue
+		}
+		if isStableLine(trimmed) {
+			lastSafeIdx = lineEnd
+		}
+	}
+
+	if inFence && fenceStart >= 0 && fenceStart < lastSafeIdx {
+		lastSafeIdx = fenceStart
+	}
+
+	if lastSafeIdx <= 0 {
+		return "", raw
+	}
+	if lastSafeIdx > len(raw) {
+		lastSafeIdx = len(raw)
+	}
+	return raw[:lastSafeIdx], raw[lastSafeIdx:]
 }
 
 // updateSuggestions 根据当前输入更新补全列表。
@@ -317,7 +405,8 @@ func printReplLinesCmd(lines []string) tea.Cmd {
 		return nil
 	}
 	text := strings.Join(clean, "\n")
-	return tea.Printf("%s", text)
+	// 必须显式添加换行，否则多次输出会粘连；tea.Printf 只是 fmt.Fprintf 的封装。
+	return tea.Printf("%s\n", text)
 }
 
 // applyEvent 将事件写入终端输出并更新审批状态。
@@ -333,12 +422,9 @@ func (m *replModel) applyEvent(ev server.Event) []string {
 	case server.EventAgentTextDelta:
 		return m.appendStreamDelta(ev.Message)
 	case server.EventAgentTextDone:
-		if m.streamActive {
-			lines := m.flushStreamBuffer()
-			m.resetStreamState()
-			return lines
-		}
-		return formatEvent(ev)
+		lines := m.flushStreamFinal(ev.Message)
+		m.resetStreamState()
+		return lines
 	case server.EventToolPlanned, server.EventTurnError, server.EventTurnFinished:
 		m.resetStreamState()
 	}
@@ -346,48 +432,82 @@ func (m *replModel) applyEvent(ev server.Event) []string {
 	return formatEvent(ev)
 }
 
+// commonPrefixLength 计算两个字符串切片的公共前缀长度。
+func commonPrefixLength(a, b []string) int {
+	minLen := len(a)
+	if len(b) < minLen {
+		minLen = len(b)
+	}
+	for i := 0; i < minLen; i++ {
+		if a[i] != b[i] {
+			return i
+		}
+	}
+	return minLen
+}
+
 // appendStreamDelta 追加流式增量并尽量输出完整行。
+// 采用基于行的增量策略：
+// 1. 累积 raw 文本，提取 stable 部分（段落/块边界）。
+// 2. 渲染 stable 部分为 lines。
+// 3. 对比已输出的 lines，仅输出新增的行。
 func (m *replModel) appendStreamDelta(delta string) []string {
 	if delta == "" {
 		return nil
 	}
 	m.streamActive = true
 	m.streamBuffer += delta
-	return m.consumeStreamLines()
-}
+	if m.streamWrapWidth <= 0 {
+		m.streamWrapWidth = m.resolveStreamWrapWidth()
+	}
 
-// consumeStreamLines 从缓冲区中提取完整行并保留尾部半行。
-func (m *replModel) consumeStreamLines() []string {
-	lastBreak := strings.LastIndex(m.streamBuffer, "\n")
-	if lastBreak == -1 {
+	stableRaw, _ := splitStableMarkdown(m.streamBuffer)
+	// 如果 stable 部分没有变化，则无需重新渲染
+	if stableRaw == "" || stableRaw == m.streamStableRaw {
 		return nil
 	}
-	chunk := m.streamBuffer[:lastBreak]
-	m.streamBuffer = m.streamBuffer[lastBreak+1:]
-	return m.decorateStreamLines(splitLines(chunk))
-}
 
-// flushStreamBuffer 在结束时输出缓冲区剩余内容。
-func (m *replModel) flushStreamBuffer() []string {
-	if !m.streamActive {
+	// 渲染当前的 stable raw
+	newRendered := renderMarkdownToANSI(stableRaw, m.streamWrapWidth)
+	newLines := splitLines(newRendered)
+
+	// 计算新增行
+	// 使用公共前缀策略，而非简单的长度切分。
+	// 这可以处理 glamour 渲染行数非单调增长的情况（例如 margin 合并/重排）。
+	commonLen := commonPrefixLength(m.streamRenderedLines, newLines)
+
+	// 如果新结果完全包含在旧结果中（极少见，除非内容回退），则不输出
+	if commonLen == len(newLines) {
 		return nil
 	}
-	lines := m.decorateStreamLines(splitLines(m.streamBuffer))
-	m.streamBuffer = ""
-	return lines
+
+	newOutput := newLines[commonLen:]
+	m.streamStableRaw = stableRaw
+	m.streamRenderedLines = newLines
+
+	return newOutput
 }
 
-// decorateStreamLines 为流式输出添加头部提示。
-func (m *replModel) decorateStreamLines(lines []string) []string {
-	if len(lines) == 0 {
+// flushStreamFinal 在流式结束时渲染并输出剩余部分。
+func (m *replModel) flushStreamFinal(final string) []string {
+	if strings.TrimSpace(final) == "" {
 		return nil
 	}
-	if !m.streamHeaderPrinted {
-		m.streamHeaderPrinted = true
-		header := styleCyan.Render("[agent] 正在生成：")
-		lines = append([]string{header}, lines...)
+	if m.streamWrapWidth <= 0 {
+		m.streamWrapWidth = m.resolveStreamWrapWidth()
 	}
-	return lines
+
+	// 渲染完整的最终文本
+	fullRendered := renderMarkdownToANSI(final, m.streamWrapWidth)
+	fullLines := splitLines(fullRendered)
+
+	commonLen := commonPrefixLength(m.streamRenderedLines, fullLines)
+	if commonLen >= len(fullLines) {
+		return nil
+	}
+
+	// 输出剩余的所有行
+	return fullLines[commonLen:]
 }
 
 // resetStreamState 清理流式输出状态，避免跨事件残留。
@@ -395,6 +515,9 @@ func (m *replModel) resetStreamState() {
 	m.streamBuffer = ""
 	m.streamActive = false
 	m.streamHeaderPrinted = false
+	m.streamStableRaw = ""
+	m.streamRenderedLines = nil
+	m.streamWrapWidth = 0
 }
 
 // resize 根据窗口尺寸调整输入框宽度。
@@ -469,7 +592,18 @@ func inputBoxContentWidth(totalWidth int) int {
 func sanitizeLines(lines []string) []string {
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
-		for _, part := range splitLines(line) {
+		// 保留显式的空行（防止被 splitLines 吞掉）
+		if line == "" {
+			out = append(out, "")
+			continue
+		}
+		parts := splitLines(line)
+		// 如果 line 非空但 parts 为空（例如仅包含换行符），也视为空行保留
+		if len(parts) == 0 {
+			out = append(out, "")
+			continue
+		}
+		for _, part := range parts {
 			out = append(out, sanitizeLine(part))
 		}
 	}
@@ -477,13 +611,16 @@ func sanitizeLines(lines []string) []string {
 }
 
 // sanitizeLine 移除 \r 等控制字符，避免破坏终端输出。
+// 注意：这里必须保留 ANSI 转义序列（ESC, 0x1b），否则颜色会退化为纯文本（例如显示成 "1;96m" / "0m"）。
 func sanitizeLine(line string) string {
 	line = strings.ReplaceAll(line, "\r", "")
 	line = strings.ReplaceAll(line, "\t", "    ")
 	return strings.Map(func(r rune) rune {
+		// 保留 ANSI ESC 序列
 		if r == '\x1b' {
 			return r
 		}
+		// 过滤其他不可见控制字符
 		if r < 32 {
 			return -1
 		}

@@ -398,11 +398,14 @@ func handleCompactCommand(args []string) ([]string, error) {
 		return nil, fmt.Errorf("压缩失败: %v", err)
 	}
 
+	// 摘要按 Markdown 渲染，提升 TUI 可读性。
+	rendered := renderMarkdownToANSI(summary, 0)
+
 	return []string{
 		"上下文压缩成功！",
 		"摘要内容:",
 		"---",
-		summary,
+		rendered,
 		"---",
 	}, nil
 }

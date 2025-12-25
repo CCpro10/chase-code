@@ -436,7 +436,7 @@ func (s *Session) emitToolError(step int, toolName string, err error) {
 
 const (
 	llmReplyPreviewMaxRunes = 1024
-	llmReplyPreviewMaxLines = 20
+	llmReplyPreviewMaxLines = 20000
 )
 
 // previewLLMReplyForLog 对 LLM 回复做简单截断，避免日志过长。

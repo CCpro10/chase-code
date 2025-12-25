@@ -3,6 +3,9 @@ package cli
 import (
 	"fmt"
 	"strings"
+	"sync"
+
+	"github.com/charmbracelet/glamour"
 
 	"chase-code/server"
 )
@@ -10,6 +13,56 @@ import (
 const (
 	toolOutputPreviewLines = 4
 )
+
+var (
+	mdRendererOnce sync.Once
+	mdRenderer     *glamour.TermRenderer
+)
+
+func getMarkdownRenderer(wordWrap int) *glamour.TermRenderer {
+	// glamour 的渲染器会捕获 wordWrap 等参数；这里用 once 初始化一个默认渲染器。
+	// 对于需要不同宽度的场景，可以直接 new 一个 renderer（当前调用频率很低）。
+	mdRendererOnce.Do(func() {
+		r, err := glamour.NewTermRenderer(
+			glamour.WithStandardStyle("dark"),
+			glamour.WithWordWrap(wordWrap),
+		)
+		if err == nil {
+			mdRenderer = r
+		}
+	})
+	return mdRenderer
+}
+
+// renderMarkdownToANSI 将 Markdown 渲染为 ANSI 文本。
+// - wordWrap<=0 时让 glamour 使用默认策略（或不强制换行）。
+// - 渲染失败时回退为原文。
+func renderMarkdownToANSI(md string, wordWrap int) string {
+	md = strings.TrimRight(md, "\n")
+	if strings.TrimSpace(md) == "" {
+		return md
+	}
+
+	// 低频调用：优先复用默认 renderer；如需要宽度控制则创建一个新的。
+	var r *glamour.TermRenderer
+	if wordWrap > 0 {
+		nr, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(wordWrap))
+		if err == nil {
+			r = nr
+		}
+	} else {
+		r = getMarkdownRenderer(wordWrap)
+	}
+	if r == nil {
+		return md
+	}
+
+	out, err := r.Render(md)
+	if err != nil {
+		return md
+	}
+	return strings.TrimRight(out, "\n")
+}
 
 // formatEvent 将事件转为可渲染的多行文本。
 func formatEvent(ev server.Event) []string {
@@ -125,11 +178,11 @@ func formatPatchApprovalResult(ev server.Event) []string {
 
 // formatAgentText 渲染最终回答内容。
 func formatAgentText(message string) []string {
-	lines := []string{styleCyan.Render("[agent] 最终回答：")}
 	if strings.TrimSpace(message) == "" {
-		return lines
+		return nil
 	}
-	return append(lines, splitLines(message)...)
+	rendered := renderMarkdownToANSI(message, 0)
+	return splitLines(rendered)
 }
 
 // formatTurnFinished 渲染 turn 结束提示。

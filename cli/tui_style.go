@@ -1,6 +1,21 @@
 package cli
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"os"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
+)
+
+func init() {
+	// 强制使用 TrueColor 配置文件并禁用终端查询，避免出现 [43;1R 或 ]11;rgb: 等干扰字符。
+	// 同时设置 lipgloss 和 termenv 的默认输出，确保全局禁用自动检测。
+	renderer := lipgloss.NewRenderer(os.Stdout)
+	renderer.SetColorProfile(termenv.TrueColor)
+	lipgloss.SetDefaultRenderer(renderer)
+
+	termenv.SetDefaultOutput(termenv.NewOutput(os.Stdout, termenv.WithProfile(termenv.TrueColor)))
+}
 
 // 终端样式集中管理，便于 TUI 统一调色。
 var (
