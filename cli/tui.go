@@ -35,7 +35,6 @@ type replModel struct {
 	suggestionIdx   int
 
 	// 流式 Markdown 渲染状态
-	streamStableRaw     string
 	streamRenderedLines []string // 已输出的渲染行缓存
 	streamWrapWidth     int
 }
@@ -177,73 +176,6 @@ func (m replModel) resolveStreamWrapWidth() int {
 		return w
 	}
 	return 80
-}
-
-// splitStableMarkdown 将输入切分为“可稳定渲染”的前缀 + 仍可能变化的尾部。
-// 目标：在不破坏 Markdown 结构的前提下，尽可能流式输出。
-//
-// 稳定边界策略（启发式）：
-// - 仅在“完整行”边界输出（必须以 \n 结尾），避免半行导致渲染抖动。
-// - fenced code block（```）必须完整闭合后才输出整个代码块（包含开关 fence 行）。
-// - 普通段落行可能因后续内容导致换行重排，默认只在“空行/标题/列表/引用/分割线”等更稳定的行后推进。
-func splitStableMarkdown(raw string) (stable string, tail string) {
-	if raw == "" {
-		return "", ""
-	}
-
-	inFence := false
-	fenceStart := -1
-	lastSafeIdx := 0
-	idx := 0
-
-	// 非 fenced code block：为了避免 glamour 因后续内容导致重排（reflow），
-	// 我们采取更保守的策略：仅在“空行”后推进输出。
-	// 这样会牺牲部分即时性，但可以显著减少重复渲染。
-	isStableLine := func(trimmed string) bool {
-		return trimmed == ""
-	}
-
-	for idx < len(raw) {
-		nl := strings.IndexByte(raw[idx:], '\n')
-		if nl == -1 {
-			break
-		}
-		lineStart := idx
-		lineEnd := idx + nl + 1
-		line := raw[lineStart:lineEnd]
-		idx = lineEnd
-
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "```") {
-			if !inFence {
-				inFence = true
-				fenceStart = lineStart
-				continue
-			}
-			inFence = false
-			fenceStart = -1
-			lastSafeIdx = lineEnd
-			continue
-		}
-		if inFence {
-			continue
-		}
-		if isStableLine(trimmed) {
-			lastSafeIdx = lineEnd
-		}
-	}
-
-	if inFence && fenceStart >= 0 && fenceStart < lastSafeIdx {
-		lastSafeIdx = fenceStart
-	}
-
-	if lastSafeIdx <= 0 {
-		return "", raw
-	}
-	if lastSafeIdx > len(raw) {
-		lastSafeIdx = len(raw)
-	}
-	return raw[:lastSafeIdx], raw[lastSafeIdx:]
 }
 
 // updateSuggestions 根据当前输入更新补全列表。
@@ -422,6 +354,13 @@ func (m *replModel) applyEvent(ev server.Event) []string {
 	case server.EventAgentTextDelta:
 		return m.appendStreamDelta(ev.Message)
 	case server.EventAgentTextDone:
+		// 如果在流式模式下，忽略 Done 消息中的文本（通常是全量），只 Flush 缓冲区
+		if m.streamActive {
+			lines := m.flushStreamFinal("")
+			m.resetStreamState()
+			return lines
+		}
+		// 非流式模式（或者流式未激活），则使用消息中的文本
 		lines := m.flushStreamFinal(ev.Message)
 		m.resetStreamState()
 		return lines
@@ -432,25 +371,92 @@ func (m *replModel) applyEvent(ev server.Event) []string {
 	return formatEvent(ev)
 }
 
-// commonPrefixLength 计算两个字符串切片的公共前缀长度。
-func commonPrefixLength(a, b []string) int {
-	minLen := len(a)
-	if len(b) < minLen {
-		minLen = len(b)
+// popSafeChunk 从 buffer 中提取可以安全渲染的完整段落（以双换行结束）。
+// 如果在代码块内，则忽略双换行，直到代码块闭合。
+// 返回 extracted chunk (包含结尾换行) 和 remaining buffer。
+func popSafeChunk(buffer string) (string, string) {
+	if buffer == "" {
+		return "", ""
 	}
-	for i := 0; i < minLen; i++ {
-		if a[i] != b[i] {
-			return i
+
+	idx := 0
+	inFence := false
+
+	// 简单的状态机扫描
+	// 我们寻找不在 fence 内的 \n\n 序列
+	length := len(buffer)
+	lastSafeEnd := -1
+
+	for idx < length {
+		// 检查 fence
+		// 必须是行首，或者前一个字符是 \n
+		isLineStart := (idx == 0) || (buffer[idx-1] == '\n')
+		if isLineStart && strings.HasPrefix(buffer[idx:], "```") {
+			// 确定这是否真的是 fence 行
+			// 找到这一行的结束
+			lineEnd := strings.IndexByte(buffer[idx:], '\n')
+			if lineEnd == -1 {
+				// 这一行还没写完，肯定不能 split，直接跳出循环等待更多输入
+				break
+			}
+
+			// 这是一个完整的 fence 行
+			if !inFence {
+				inFence = true
+			} else {
+				inFence = false
+			}
+			idx += lineEnd + 1
+			continue
 		}
+
+		if inFence {
+			// 在 fence 内，直接跳到下一行
+			lineEnd := strings.IndexByte(buffer[idx:], '\n')
+			if lineEnd == -1 {
+				break
+			}
+			idx += lineEnd + 1
+			continue
+		}
+
+		// 不在 fence 内，检查是否是双换行
+		// 我们的目标是找到 \n\n
+		// 注意：idx 目前指向行首（或者某行的开始）
+		// 如果 buffer[idx] 是 \n，且 buffer[idx-1] 也是 \n (由于循环逻辑，我们其实是在寻找连续的换行)
+
+		// 让我们简化逻辑：直接查找 \n\n
+		// 从当前 idx 开始找
+		nextNL := strings.IndexByte(buffer[idx:], '\n')
+		if nextNL == -1 {
+			break
+		}
+
+		// 找到了一个换行
+		nlPos := idx + nextNL
+
+		// 检查这个换行之后是否紧接着另一个换行
+		// 注意：如果是 Windows 的 \r\n，这里可能需要更复杂的逻辑。
+		// 但 glamour/bubbletea 通常处理 LF。
+		// 检查 nlPos+1 是否也是 \n
+		if nlPos+1 < length && buffer[nlPos+1] == '\n' {
+			// 这是一个段落边界
+			// chunk 应该包含这个边界
+			lastSafeEnd = nlPos + 2 // include \n\n
+			idx = lastSafeEnd
+			continue // 继续找，贪婪匹配？不，我们流式输出，找到一个就可以输出了，减少延迟
+			// 但为了性能，可以一次输出多个段落?
+			// 这里我们返回找到的第一个段落即可
+			return buffer[:lastSafeEnd], buffer[lastSafeEnd:]
+		}
+
+		idx = nlPos + 1
 	}
-	return minLen
+
+	return "", buffer
 }
 
-// appendStreamDelta 追加流式增量并尽量输出完整行。
-// 采用基于行的增量策略：
-// 1. 累积 raw 文本，提取 stable 部分（段落/块边界）。
-// 2. 渲染 stable 部分为 lines。
-// 3. 对比已输出的 lines，仅输出新增的行。
+// appendStreamDelta 追加流式增量并输出已完成的块。
 func (m *replModel) appendStreamDelta(delta string) []string {
 	if delta == "" {
 		return nil
@@ -461,53 +467,59 @@ func (m *replModel) appendStreamDelta(delta string) []string {
 		m.streamWrapWidth = m.resolveStreamWrapWidth()
 	}
 
-	stableRaw, _ := splitStableMarkdown(m.streamBuffer)
-	// 如果 stable 部分没有变化，则无需重新渲染
-	if stableRaw == "" || stableRaw == m.streamStableRaw {
-		return nil
+	var output []string
+
+	for {
+		chunk, remaining := popSafeChunk(m.streamBuffer)
+		if chunk == "" {
+			break
+		}
+
+		// 渲染这个 chunk
+		rendered := renderMarkdownToANSI(chunk, m.streamWrapWidth)
+
+		// 清理渲染结果的首尾空行，避免块之间叠加过大的 margin
+		rendered = strings.TrimSpace(rendered)
+		if rendered != "" {
+			// 在输出前，我们需要决定是否加换行。
+			// 因为 popSafeChunk 是按段落切的，段落之间应该有空行。
+			// 但 glamour 可能已经在内部渲染了边距。
+			// 策略：输出 rendered 后，再手动 append 一个空行，模拟段落间距。
+			// 注意：splitLines 会把字符串切成行数组
+			lines := splitLines(rendered)
+			output = append(output, lines...)
+			output = append(output, "") // 段落间距
+		}
+
+		m.streamBuffer = remaining
 	}
 
-	// 渲染当前的 stable raw
-	newRendered := renderMarkdownToANSI(stableRaw, m.streamWrapWidth)
-	newLines := splitLines(newRendered)
-
-	// 计算新增行
-	// 使用公共前缀策略，而非简单的长度切分。
-	// 这可以处理 glamour 渲染行数非单调增长的情况（例如 margin 合并/重排）。
-	commonLen := commonPrefixLength(m.streamRenderedLines, newLines)
-
-	// 如果新结果完全包含在旧结果中（极少见，除非内容回退），则不输出
-	if commonLen == len(newLines) {
-		return nil
-	}
-
-	newOutput := newLines[commonLen:]
-	m.streamStableRaw = stableRaw
-	m.streamRenderedLines = newLines
-
-	return newOutput
+	return output
 }
 
 // flushStreamFinal 在流式结束时渲染并输出剩余部分。
 func (m *replModel) flushStreamFinal(final string) []string {
-	if strings.TrimSpace(final) == "" {
-		return nil
+	if final != "" {
+		m.streamBuffer += final
 	}
+
 	if m.streamWrapWidth <= 0 {
 		m.streamWrapWidth = m.resolveStreamWrapWidth()
 	}
 
-	// 渲染完整的最终文本
-	fullRendered := renderMarkdownToANSI(final, m.streamWrapWidth)
-	fullLines := splitLines(fullRendered)
-
-	commonLen := commonPrefixLength(m.streamRenderedLines, fullLines)
-	if commonLen >= len(fullLines) {
+	// 此时无论是否有闭合 fence，都强制渲染
+	if strings.TrimSpace(m.streamBuffer) == "" {
 		return nil
 	}
 
-	// 输出剩余的所有行
-	return fullLines[commonLen:]
+	rendered := renderMarkdownToANSI(m.streamBuffer, m.streamWrapWidth)
+	rendered = strings.TrimSpace(rendered)
+
+	if rendered == "" {
+		return nil
+	}
+
+	return splitLines(rendered)
 }
 
 // resetStreamState 清理流式输出状态，避免跨事件残留。
@@ -515,7 +527,6 @@ func (m *replModel) resetStreamState() {
 	m.streamBuffer = ""
 	m.streamActive = false
 	m.streamHeaderPrinted = false
-	m.streamStableRaw = ""
 	m.streamRenderedLines = nil
 	m.streamWrapWidth = 0
 }
