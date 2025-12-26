@@ -5,6 +5,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -19,14 +21,15 @@ const (
 
 // replModel 负责管理 TUI 的状态与渲染。
 type replModel struct {
-	input             textinput.Model
-	events            <-chan server.Event
-	pendingApprovalID string
-	exiting           bool
-	width             int
-	height            int
-	streamActive      bool
-	initialInput      string
+	input              textinput.Model
+	events             <-chan server.Event
+	pendingApprovalID  string
+	exiting            bool
+	width              int
+	height             int
+	streamActive       bool
+	initialInput       string
+	autoExitOnTurnDone bool
 
 	// 补全列表相关
 	showSuggestions bool
@@ -75,9 +78,10 @@ func newReplModel(events <-chan server.Event, initialInput string) replModel {
 	input.Focus()
 
 	return replModel{
-		input:        input,
-		events:       events,
-		initialInput: initialInput,
+		input:              input,
+		events:             events,
+		initialInput:       initialInput,
+		autoExitOnTurnDone: strings.TrimSpace(os.Getenv("CHASE_TUI_EXIT_ON_DONE")) != "",
 	}
 }
 
@@ -140,9 +144,17 @@ func (m replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case replEventMsg:
 		lines := m.applyEvent(msg.event)
+		cmd := printReplLinesCmd(lines)
+		if m.autoExitOnTurnDone && shouldExitAfterEvent(msg.event) {
+			m.exiting = true
+			if cmd == nil {
+				return m, tea.Quit
+			}
+			return m, tea.Sequence(cmd, tea.Quit)
+		}
 		return m, tea.Batch(
 			listenForReplEvent(m.events),
-			printReplLinesCmd(lines),
+			cmd,
 		)
 	case replEventClosedMsg:
 		return m, printReplLinesCmd([]string{styleDim.Render("[event] 通道已关闭")})
@@ -336,6 +348,7 @@ func printReplLinesCmd(lines []string) tea.Cmd {
 	if len(clean) == 0 {
 		return nil
 	}
+	writeTUILog(clean)
 	text := strings.Join(clean, "\n")
 	// 必须显式添加换行，否则多次输出会粘连；tea.Printf 只是 fmt.Fprintf 的封装。
 	return tea.Printf("%s\n", text)
@@ -369,6 +382,16 @@ func (m *replModel) applyEvent(ev server.Event) []string {
 	}
 
 	return formatEvent(ev)
+}
+
+// shouldExitAfterEvent 判断自动退出模式下是否应结束程序。
+func shouldExitAfterEvent(ev server.Event) bool {
+	switch ev.Kind {
+	case server.EventTurnFinished, server.EventTurnError:
+		return true
+	default:
+		return false
+	}
 }
 
 // appendStreamDelta 追加流式增量并输出已完成的完整行。
@@ -590,4 +613,57 @@ func sanitizeLine(line string) string {
 		}
 		return r
 	}, line)
+}
+
+var (
+	tuiLogOnce sync.Once
+	tuiLogPath string
+	tuiLogMu   sync.Mutex
+)
+
+// writeTUILog 将 TUI 输出写入指定日志文件，便于离线排查渲染效果。
+func writeTUILog(lines []string) {
+	path := getTUILogPath()
+	if path == "" || len(lines) == 0 {
+		return
+	}
+	plain := strings.TrimSpace(os.Getenv("CHASE_TUI_LOG_PLAIN")) != ""
+	payload := formatTUILogPayload(lines, plain)
+	if payload == "" {
+		return
+	}
+
+	tuiLogMu.Lock()
+	defer tuiLogMu.Unlock()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString(payload)
+}
+
+// getTUILogPath 读取日志路径并缓存，避免频繁读取环境变量。
+func getTUILogPath() string {
+	tuiLogOnce.Do(func() {
+		tuiLogPath = strings.TrimSpace(os.Getenv("CHASE_TUI_LOG_PATH"))
+	})
+	return tuiLogPath
+}
+
+// formatTUILogPayload 格式化日志内容，必要时移除 ANSI 码。
+func formatTUILogPayload(lines []string, plain bool) string {
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if plain {
+			out = append(out, stripANSI(line))
+			continue
+		}
+		out = append(out, line)
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	ts := time.Now().Format(time.RFC3339Nano)
+	return fmt.Sprintf("[%s]\n%s\n\n", ts, strings.Join(out, "\n"))
 }

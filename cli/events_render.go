@@ -2,8 +2,11 @@ package cli
 
 import (
 	"fmt"
+	"log"
+	"os"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/glamour"
 
@@ -38,6 +41,7 @@ func getMarkdownRenderer(wordWrap int) *glamour.TermRenderer {
 // - wordWrap<=0 时让 glamour 使用默认策略（或不强制换行）。
 // - 渲染失败时回退为原文。
 func renderMarkdownToANSI(md string, wordWrap int) string {
+	md = normalizeMarkdownForTUI(md)
 	md = strings.TrimRight(md, "\n")
 	if strings.TrimSpace(md) == "" {
 		return md
@@ -61,7 +65,314 @@ func renderMarkdownToANSI(md string, wordWrap int) string {
 	if err != nil {
 		return md
 	}
-	return strings.TrimRight(out, "\n")
+	raw := strings.TrimRight(out, "\n")
+	debugMarkdownRender(md, raw)
+	trimmed := trimRenderedBlankEdges(raw)
+	if shouldDebugTUI() && trimmed != raw {
+		log.Printf("markdown render: trimmed edge blank lines")
+	}
+	return trimmed
+}
+
+// normalizeMarkdownForTUI 统一流式与全量渲染的 Markdown 预处理，减少非预期空行。
+func normalizeMarkdownForTUI(md string) string {
+	if strings.TrimSpace(md) == "" {
+		return md
+	}
+
+	lines := splitLinesPreserveTrailing(md)
+	var bulletConverted int
+	var blankRemoved int
+
+	lines, bulletConverted = normalizeListBulletChars(lines)
+	lines, blankRemoved = compactListBlankLines(lines)
+	normalized := strings.Join(lines, "\n")
+
+	if shouldDebugTUI() && normalized != md {
+		log.Printf("markdown normalize: bullets=%d blanks_removed=%d", bulletConverted, blankRemoved)
+		log.Printf("markdown normalize input:\n---\n%s\n---", md)
+		log.Printf("markdown normalize output:\n---\n%s\n---", normalized)
+	}
+
+	return normalized
+}
+
+// splitLinesPreserveTrailing 将文本按行拆分，并保留末尾空行。
+func splitLinesPreserveTrailing(s string) []string {
+	if s == "" {
+		return []string{""}
+	}
+	lines := strings.Split(s, "\n")
+	return lines
+}
+
+// normalizeListBulletChars 将常见的非标准项目符号转换为 Markdown 列表标记。
+func normalizeListBulletChars(lines []string) ([]string, int) {
+	out := make([]string, 0, len(lines))
+	converted := 0
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		if isBulletOnlyLine(line) {
+			nextIdx := nextNonEmptyIndex(lines, i+1)
+			if nextIdx != -1 && !isListLine(lines[nextIdx]) && !isBulletOnlyLine(lines[nextIdx]) {
+				merged := mergeBulletWithContent(line, lines[nextIdx])
+				out = append(out, merged)
+				converted++
+				i = nextIdx
+				continue
+			}
+		}
+
+		normalized := normalizeBulletLine(line)
+		if normalized != line {
+			converted++
+		}
+		out = append(out, normalized)
+	}
+	return out, converted
+}
+
+// normalizeBulletLine 将单行的 "• xxx" 形式转换为 "- xxx"，保留缩进。
+func normalizeBulletLine(line string) string {
+	trimmed := strings.TrimLeft(line, " \t")
+	if trimmed == "" {
+		return line
+	}
+
+	r, size := utf8.DecodeRuneInString(trimmed)
+	if !isBulletRune(r) {
+		return line
+	}
+
+	rest := strings.TrimLeft(trimmed[size:], " \t")
+	if rest == "" {
+		return line
+	}
+
+	indent := line[:len(line)-len(trimmed)]
+	return indent + "- " + rest
+}
+
+func isBulletRune(r rune) bool {
+	switch r {
+	case '•', '·', '∙', '◦', '‣', '▪':
+		return true
+	default:
+		return false
+	}
+}
+
+// isBulletOnlyLine 判断是否为仅包含项目符号的占位行。
+func isBulletOnlyLine(line string) bool {
+	trimmed := strings.TrimLeft(line, " \t")
+	if trimmed == "" {
+		return false
+	}
+	r, size := utf8.DecodeRuneInString(trimmed)
+	if !isBulletRune(r) {
+		return false
+	}
+	rest := strings.TrimSpace(trimmed[size:])
+	return rest == ""
+}
+
+// mergeBulletWithContent 将项目符号行与下一行内容合并成标准列表项。
+func mergeBulletWithContent(bulletLine string, contentLine string) string {
+	indent := bulletLine[:len(bulletLine)-len(strings.TrimLeft(bulletLine, " \t"))]
+	content := strings.TrimLeft(contentLine, " \t")
+	return indent + "- " + content
+}
+
+// compactListBlankLines 压缩列表项之间的空行，避免渲染时产生过大的间距。
+func compactListBlankLines(lines []string) ([]string, int) {
+	out := make([]string, 0, len(lines))
+	removed := 0
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		if strings.TrimSpace(line) != "" {
+			out = append(out, line)
+			continue
+		}
+
+		prev := prevNonEmptyIndex(lines, i-1)
+		next := nextNonEmptyIndex(lines, i+1)
+		if prev >= 0 && next >= 0 && isListLine(lines[prev]) && isListLine(lines[next]) {
+			removed++
+			continue
+		}
+
+		out = append(out, line)
+	}
+	return out, removed
+}
+
+func prevNonEmptyIndex(lines []string, start int) int {
+	for i := start; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			return i
+		}
+	}
+	return -1
+}
+
+func nextNonEmptyIndex(lines []string, start int) int {
+	for i := start; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) != "" {
+			return i
+		}
+	}
+	return -1
+}
+
+func isListLine(line string) bool {
+	trimmed := strings.TrimLeft(line, " \t")
+	if trimmed == "" {
+		return false
+	}
+	if isBulletOnlyLine(line) {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") || strings.HasPrefix(trimmed, "+ ") {
+		return true
+	}
+
+	dot := strings.IndexByte(trimmed, '.')
+	if dot <= 0 || dot+1 >= len(trimmed) {
+		return false
+	}
+	for i := 0; i < dot; i++ {
+		if trimmed[i] < '0' || trimmed[i] > '9' {
+			return false
+		}
+	}
+	return trimmed[dot+1] == ' ' || trimmed[dot+1] == '\t'
+}
+
+func shouldDebugTUI() bool {
+	return strings.TrimSpace(os.Getenv("CHASE_TUI_DEBUG")) != ""
+}
+
+func debugMarkdownRender(md string, rendered string) {
+	if !shouldDebugTUI() {
+		return
+	}
+	lines := splitLines(rendered)
+	if len(lines) == 0 {
+		return
+	}
+	blankCount, maxBlankRun := countBlankRuns(lines)
+	listGaps := findListBlankGaps(lines)
+	if blankCount == 0 && len(listGaps) == 0 {
+		return
+	}
+	log.Printf("markdown render stats: lines=%d blank=%d max_blank_run=%d list_gaps=%d", len(lines), blankCount, maxBlankRun, len(listGaps))
+	if len(listGaps) > 0 {
+		log.Printf("markdown render list gaps at lines: %v", listGaps)
+		logRenderedGapContext(lines, listGaps, 2)
+	}
+	if maxBlankRun > 1 {
+		logRenderedBlankRuns(lines, 2)
+	}
+	log.Printf("markdown render source:\n---\n%s\n---", md)
+}
+
+func trimRenderedBlankEdges(rendered string) string {
+	lines := splitLines(rendered)
+	if len(lines) == 0 {
+		return rendered
+	}
+	start := 0
+	for start < len(lines) && isVisualEmptyLine(stripANSI(lines[start])) {
+		start++
+	}
+	end := len(lines)
+	for end > start && isVisualEmptyLine(stripANSI(lines[end-1])) {
+		end--
+	}
+	if start == 0 && end == len(lines) {
+		return rendered
+	}
+	if start >= end {
+		return ""
+	}
+	return strings.Join(lines[start:end], "\n")
+}
+
+func countBlankRuns(lines []string) (int, int) {
+	blankCount := 0
+	maxRun := 0
+	run := 0
+	for _, line := range lines {
+		if isVisualEmptyLine(stripANSI(line)) {
+			blankCount++
+			run++
+			if run > maxRun {
+				maxRun = run
+			}
+			continue
+		}
+		run = 0
+	}
+	return blankCount, maxRun
+}
+
+func findListBlankGaps(lines []string) []int {
+	var gaps []int
+	for i := 1; i < len(lines)-1; i++ {
+		if !isVisualEmptyLine(stripANSI(lines[i])) {
+			continue
+		}
+		prev := strings.TrimSpace(stripANSI(lines[i-1]))
+		next := strings.TrimSpace(stripANSI(lines[i+1]))
+		if isListLine(prev) && isListLine(next) {
+			gaps = append(gaps, i)
+		}
+	}
+	return gaps
+}
+
+func logRenderedGapContext(lines []string, gaps []int, radius int) {
+	maxGaps := 5
+	for idx, gap := range gaps {
+		if idx >= maxGaps {
+			log.Printf("markdown render gap context truncated at %d gaps", maxGaps)
+			return
+		}
+		start := gap - radius
+		if start < 0 {
+			start = 0
+		}
+		end := gap + radius
+		if end >= len(lines) {
+			end = len(lines) - 1
+		}
+		for i := start; i <= end; i++ {
+			content := stripANSI(lines[i])
+			log.Printf("render[%d]=%q", i, content)
+		}
+	}
+}
+
+func logRenderedBlankRuns(lines []string, maxRuns int) {
+	run := 0
+	seen := 0
+	for i, line := range lines {
+		if isVisualEmptyLine(stripANSI(line)) {
+			run++
+			continue
+		}
+		if run > 1 {
+			seen++
+			log.Printf("markdown render blank run: end=%d len=%d", i-1, run)
+			if seen >= maxRuns {
+				return
+			}
+		}
+		run = 0
+	}
+	if run > 1 {
+		log.Printf("markdown render blank run: end=%d len=%d", len(lines)-1, run)
+	}
 }
 
 // formatEvent 将事件转为可渲染的多行文本。
