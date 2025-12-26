@@ -350,8 +350,9 @@ func printReplLinesCmd(lines []string) tea.Cmd {
 	}
 	writeTUILog(clean)
 	text := strings.Join(clean, "\n")
-	// 必须显式添加换行，否则多次输出会粘连；tea.Printf 只是 fmt.Fprintf 的封装。
-	return tea.Printf("%s\n", text)
+
+	// todo text 尾部可能会缺失换行符 导致粘连
+	return tea.Printf("%s", text)
 }
 
 // applyEvent 将事件写入终端输出并更新审批状态。
