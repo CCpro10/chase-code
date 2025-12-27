@@ -40,10 +40,11 @@ type replModel struct {
 
 // suggestionItem 实现 list.Item 接口，用于补全列表。
 type suggestionItem struct {
-	suggestion Suggestion
+	suggestion   Suggestion
+	displayTitle string
 }
 
-func (i suggestionItem) Title() string       { return "/" + i.suggestion.Name() }
+func (i suggestionItem) Title() string       { return i.displayTitle }
 func (i suggestionItem) Description() string { return i.suggestion.Description() }
 func (i suggestionItem) FilterValue() string { return i.suggestion.Name() }
 
@@ -84,7 +85,7 @@ func newReplModel(events <-chan server.Event, initialInput string, dispatcher Di
 
 	// 初始化 list 作为补全面板
 	delegate := list.NewDefaultDelegate()
-	delegate.ShowDescription = true
+	delegate.ShowDescription = false
 	delegate.SetSpacing(0)
 	// 让 list 的选中/非选中风格与旧实现接近
 	delegate.Styles.SelectedTitle = styleSelected.Padding(0, 1)
@@ -98,6 +99,7 @@ func newReplModel(events <-chan server.Event, initialInput string, dispatcher Di
 	l.SetShowHelp(false)
 	l.SetShowFilter(false)
 	l.SetFilteringEnabled(false)
+	l.SetShowPagination(false)
 
 	return replModel{
 		input:              input,
@@ -152,6 +154,7 @@ func (m replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case tea.KeyEsc:
 				m.showList = false
 				return m, nil
+			default:
 			}
 		}
 
@@ -242,8 +245,8 @@ func (m *replModel) updateSuggestions() {
 	}
 
 	prefix := strings.TrimPrefix(val, "/")
-	items := make([]list.Item, 0, 8)
-	selectedIdx := -1
+	var matches []Suggestion
+	maxLen := 0
 
 	for _, cmd := range m.allSuggestions {
 		matched := false
@@ -259,16 +262,34 @@ func (m *replModel) updateSuggestions() {
 		}
 
 		if matched {
-			if cmd.Name() == selectedName {
-				selectedIdx = len(items)
+			matches = append(matches, cmd)
+			if l := len(cmd.Name()); l > maxLen {
+				maxLen = l
 			}
-			items = append(items, suggestionItem{suggestion: cmd})
 		}
 	}
 
-	if len(items) == 0 {
+	if len(matches) == 0 {
 		m.showList = false
 		return
+	}
+
+	items := make([]list.Item, 0, len(matches))
+	selectedIdx := -1
+
+	// 确保最小对齐宽度
+	padWidth := maxLen
+	if padWidth < 12 {
+		padWidth = 12
+	}
+
+	for i, cmd := range matches {
+		if cmd.Name() == selectedName {
+			selectedIdx = i
+		}
+		// 格式化：/cmdName + spaces + description
+		display := fmt.Sprintf("/%-*s  %s", padWidth, cmd.Name(), cmd.Description())
+		items = append(items, suggestionItem{suggestion: cmd, displayTitle: display})
 	}
 
 	m.list.SetItems(items)
@@ -278,12 +299,12 @@ func (m *replModel) updateSuggestions() {
 		m.list.Select(0)
 	}
 
-	// 动态调整列表高度：最多显示 5 条；每条 2 行（title + desc）
+	// 动态调整列表高度：最多显示 8 条；现在每条只占 1 行
 	visible := len(items)
-	if visible > 5 {
-		visible = 5
+	if visible > 8 {
+		visible = 8
 	}
-	m.list.SetHeight(visible * 2)
+	m.list.SetHeight(visible)
 	m.showList = true
 }
 
