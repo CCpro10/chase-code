@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -15,34 +16,36 @@ import (
 	"chase-code/server"
 )
 
-const (
-	inputBoxPadding = 1
-)
-
 // replModel 负责管理 TUI 的状态与渲染。
 type replModel struct {
 	input              textinput.Model
+	list               list.Model
 	events             <-chan server.Event
 	dispatcher         Dispatcher
 	pendingApprovalID  string
 	exiting            bool
-	width              int
-	height             int
 	streamActive       bool
 	initialInput       string
 	autoExitOnTurnDone bool
 
 	// 补全列表相关
-	allSuggestions  []Suggestion
-	showSuggestions bool
-	suggestions     []Suggestion
-	suggestionIdx   int
+	allSuggestions []Suggestion
+	showList       bool
 
 	// 流式 Markdown 渲染状态
 	streamBuffer             string // 原始流式 Markdown 累积内容
 	streamCommittedLineCount int    // 已提交的渲染行数
 	streamWrapWidth          int
 }
+
+// suggestionItem 实现 list.Item 接口，用于补全列表。
+type suggestionItem struct {
+	suggestion Suggestion
+}
+
+func (i suggestionItem) Title() string       { return "/" + i.suggestion.Name() }
+func (i suggestionItem) Description() string { return i.suggestion.Description() }
+func (i suggestionItem) FilterValue() string { return i.suggestion.Name() }
 
 type replEventMsg struct {
 	event server.Event
@@ -72,20 +75,38 @@ func Run(events <-chan server.Event, initialInput string, dispatcher Dispatcher,
 
 // newReplModel 构造 TUI 模型。
 func newReplModel(events <-chan server.Event, initialInput string, dispatcher Dispatcher, suggestions []Suggestion) replModel {
+	// 初始化 Input
 	input := textinput.New()
-	input.Prompt = "chase> "
-	input.PromptStyle = stylePrompt
+	input.Prompt = ""
 	input.TextStyle = styleInput
 	input.CursorStyle = styleInput
 	input.Focus()
 
+	// 初始化 list 作为补全面板
+	delegate := list.NewDefaultDelegate()
+	delegate.ShowDescription = true
+	delegate.SetSpacing(0)
+	// 让 list 的选中/非选中风格与旧实现接近
+	delegate.Styles.SelectedTitle = styleSelected.Padding(0, 1)
+	delegate.Styles.SelectedDesc = styleSelected.Padding(0, 1)
+	delegate.Styles.NormalTitle = styleDim.Padding(0, 1)
+	delegate.Styles.NormalDesc = styleDim.Padding(0, 1)
+
+	l := list.New(nil, delegate, 0, 0)
+	l.SetShowTitle(false)
+	l.SetShowStatusBar(false)
+	l.SetShowHelp(false)
+	l.SetShowFilter(false)
+	l.SetFilteringEnabled(false)
+
 	return replModel{
 		input:              input,
+		list:               l,
 		events:             events,
 		dispatcher:         dispatcher,
-		allSuggestions:     suggestions,
 		initialInput:       initialInput,
 		autoExitOnTurnDone: strings.TrimSpace(os.Getenv("CHASE_TUI_EXIT_ON_DONE")) != "",
+		allSuggestions:     suggestions,
 	}
 }
 
@@ -108,33 +129,28 @@ func (m replModel) Init() tea.Cmd {
 func (m replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.resize(msg.Width, msg.Height)
-		return m, nil
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		m.resize(msg.Width)
+		return m, cmd
+
 	case tea.KeyMsg:
-		if m.showSuggestions {
+		// 补全列表可见时，优先处理 list 导航/选择
+		if m.showList {
 			switch msg.Type {
-			case tea.KeyUp:
-				m.suggestionIdx--
-				if m.suggestionIdx < 0 {
-					m.suggestionIdx = len(m.suggestions) - 1
-				}
-				return m, nil
-			case tea.KeyDown, tea.KeyTab:
-				m.suggestionIdx++
-				if m.suggestionIdx >= len(m.suggestions) {
-					m.suggestionIdx = 0
-				}
-				return m, nil
-			case tea.KeyEnter:
-				if len(m.suggestions) > 0 {
-					cmd := m.suggestions[m.suggestionIdx]
-					m.input.SetValue("/" + cmd.Name() + " ")
+			case tea.KeyUp, tea.KeyDown:
+				var cmd tea.Cmd
+				m.list, cmd = m.list.Update(msg)
+				return m, cmd
+			case tea.KeyTab, tea.KeyEnter:
+				if it, ok := m.list.SelectedItem().(suggestionItem); ok {
+					m.input.SetValue("/" + it.suggestion.Name() + " ")
 					m.input.CursorEnd()
-					m.showSuggestions = false
-					return m, nil
+					m.showList = false
 				}
+				return m, nil
 			case tea.KeyEsc:
-				m.showSuggestions = false
+				m.showList = false
 				return m, nil
 			}
 		}
@@ -146,6 +162,7 @@ func (m replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyEnter:
 			return m.handleEnter()
 		}
+
 	case replEventMsg:
 		lines := m.applyEvent(msg.event)
 		cmd := printReplLinesCmd(lines)
@@ -179,40 +196,54 @@ func (m replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m replModel) resolveStreamWrapWidth() int {
-	// 使用首次进入流式时的宽度，避免窗口变化导致渲染不稳定（会破坏增量前缀判断）。
 	if m.streamWrapWidth > 0 {
+		if m.streamWrapWidth < 20 {
+			return 20
+		}
 		return m.streamWrapWidth
 	}
-	// 经验值：按终端宽度换行；没有窗口尺寸时回退 80。
-	if m.width > 0 {
-		w := m.width
-		if w < 20 {
-			w = 20
-		}
-		return w
-	}
 	return 80
+}
+
+// View 渲染输入框组件。
+func (m replModel) View() string {
+	if m.exiting {
+		return ""
+	}
+
+	inputView := m.input.View()
+	if !m.showList {
+		return inputView
+	}
+
+	listView := m.list.View()
+	listView = lipgloss.NewStyle().
+		Border(asciiBorder).
+		BorderForeground(lipgloss.Color("8")).
+		Padding(0, 1).
+		Render(listView)
+
+	// 补全列表放在输入框下方
+	return lipgloss.JoinVertical(lipgloss.Left, inputView, listView)
 }
 
 // updateSuggestions 根据当前输入更新补全列表。
 func (m *replModel) updateSuggestions() {
 	val := m.input.Value()
 	if !strings.HasPrefix(val, "/") || strings.Contains(val, " ") {
-		m.showSuggestions = false
-		m.suggestions = nil
-		m.suggestionIdx = 0
+		m.showList = false
 		return
 	}
 
-	// 记录当前选中的命令名，以便在列表更新后尝试恢复选中状态
-	var currentSelectedName string
-	if m.showSuggestions && m.suggestionIdx < len(m.suggestions) {
-		currentSelectedName = m.suggestions[m.suggestionIdx].Name()
+	// 记录当前选中的命令名，尽量在列表更新后恢复
+	var selectedName string
+	if it, ok := m.list.SelectedItem().(suggestionItem); ok {
+		selectedName = it.suggestion.Name()
 	}
 
 	prefix := strings.TrimPrefix(val, "/")
-	var matches []Suggestion
-	newSelectedIdx := -1
+	items := make([]list.Item, 0, 8)
+	selectedIdx := -1
 
 	for _, cmd := range m.allSuggestions {
 		matched := false
@@ -228,69 +259,32 @@ func (m *replModel) updateSuggestions() {
 		}
 
 		if matched {
-			if cmd.Name() == currentSelectedName {
-				newSelectedIdx = len(matches)
+			if cmd.Name() == selectedName {
+				selectedIdx = len(items)
 			}
-			matches = append(matches, cmd)
+			items = append(items, suggestionItem{suggestion: cmd})
 		}
 	}
 
-	if len(matches) > 0 {
-		m.suggestions = matches
-		m.showSuggestions = true
-		if newSelectedIdx != -1 {
-			m.suggestionIdx = newSelectedIdx
-		} else if m.suggestionIdx >= len(matches) {
-			m.suggestionIdx = 0
-		}
+	if len(items) == 0 {
+		m.showList = false
+		return
+	}
+
+	m.list.SetItems(items)
+	if selectedIdx >= 0 {
+		m.list.Select(selectedIdx)
 	} else {
-		m.showSuggestions = false
-		m.suggestions = nil
-		m.suggestionIdx = 0
-	}
-}
-
-// View 渲染输入框组件。
-func (m replModel) View() string {
-	if m.exiting {
-		return ""
+		m.list.Select(0)
 	}
 
-	inputView := m.inputBoxView()
-	if !m.showSuggestions || len(m.suggestions) == 0 {
-		return inputView
+	// 动态调整列表高度：最多显示 5 条；每条 2 行（title + desc）
+	visible := len(items)
+	if visible > 5 {
+		visible = 5
 	}
-
-	// 补全列表放在输入框上方，这样输入框在终端底部的物理位置最稳定
-	return lipgloss.JoinVertical(lipgloss.Left, m.suggestionsView(), inputView)
-}
-
-// suggestionsView 渲染补全列表。
-func (m replModel) suggestionsView() string {
-	if len(m.suggestions) == 0 {
-		return ""
-	}
-
-	var lines []string
-	for i, cmd := range m.suggestions {
-		name := "/" + cmd.Name()
-		desc := cmd.Description()
-		line := fmt.Sprintf(" %-15s  %s ", name, desc)
-		if i == m.suggestionIdx {
-			line = styleSelected.Render(line)
-		} else {
-			line = styleDim.Render(line)
-		}
-		lines = append(lines, line)
-	}
-
-	// 设置与输入框一致的宽度，并去掉底部边距，让它与输入框无缝衔接
-	return lipgloss.NewStyle().
-		Border(asciiBorder).
-		BorderForeground(lipgloss.Color("8")).
-		Padding(0, 1).
-		Width(m.width).
-		Render(strings.Join(lines, "\n"))
+	m.list.SetHeight(visible * 2)
+	m.showList = true
 }
 
 // handleEnter 处理回车输入并触发异步分发。
@@ -357,8 +351,6 @@ func printReplLinesCmd(lines []string) tea.Cmd {
 	}
 	writeTUILog(clean)
 	text := strings.Join(clean, "\n")
-
-	// todo text 尾部可能会缺失换行符 导致粘连
 	return tea.Printf("%s", text)
 }
 
@@ -375,13 +367,11 @@ func (m *replModel) applyEvent(ev server.Event) []string {
 	case server.EventAgentTextDelta:
 		return m.appendStreamDelta(ev.Message)
 	case server.EventAgentTextDone:
-		// 如果在流式模式下，忽略 Done 消息中的文本（通常是全量），只 Flush 缓冲区
 		if m.streamActive {
 			lines := m.flushStreamFinal("")
 			m.resetStreamState()
 			return lines
 		}
-		// 非流式模式（或者流式未激活），则使用消息中的文本
 		lines := m.flushStreamFinal(ev.Message)
 		m.resetStreamState()
 		return lines
@@ -421,7 +411,6 @@ func (m *replModel) appendStreamDelta(delta string) []string {
 }
 
 // streamCommitCompleteLines 渲染到最后一个换行符并提交新增完整行。
-// 该策略参考 codex-rs 的流式 Markdown 处理方式，避免输出未稳定的行。
 func (m *replModel) streamCommitCompleteLines() []string {
 	lastNewline := strings.LastIndex(m.streamBuffer, "\n")
 	if lastNewline == -1 {
@@ -459,7 +448,6 @@ func (m *replModel) flushStreamFinal(final string) []string {
 		m.streamWrapWidth = m.resolveStreamWrapWidth()
 	}
 
-	// 此时无论是否有闭合 fence，都强制渲染
 	if strings.TrimSpace(m.streamBuffer) == "" {
 		return nil
 	}
@@ -483,33 +471,26 @@ func (m *replModel) resetStreamState() {
 	m.streamBuffer = ""
 	m.streamActive = false
 	m.streamCommittedLineCount = 0
-	m.streamWrapWidth = 0
+	// 保留上一次的 wrap 宽度（通常来自 WindowSizeMsg），避免下一轮回退到默认 80。
 }
 
-// resize 根据窗口尺寸调整输入框宽度。
-func (m *replModel) resize(width, height int) {
-	m.width = width
-	m.height = height
-	contentWidth := inputBoxContentWidth(width)
-	promptWidth := lipgloss.Width(m.input.Prompt)
-	inputWidth := contentWidth - promptWidth - 1
-	if inputWidth < 0 {
-		inputWidth = 0
+// resize 根据窗口尺寸调整输入框与补全列表的宽度。
+func (m *replModel) resize(width int) {
+	if width < 0 {
+		width = 0
 	}
-	m.input.Width = inputWidth
-}
+	if width < 20 {
+		m.streamWrapWidth = 20
+	} else {
+		m.streamWrapWidth = width
+	}
 
-// inputBoxView 将输入框包裹成带边框的视图。
-func (m replModel) inputBoxView() string {
-	view := m.input.View()
-	if m.width <= 0 {
-		return view
+	// list 的内部宽度（外层还会再包一层边框）
+	w := width - 4
+	if w < 0 {
+		w = 0
 	}
-	style := styleInputBox
-	if m.input.Focused() {
-		style = styleInputOn
-	}
-	return style.Width(m.width).Render(view)
+	m.list.SetWidth(w)
 }
 
 // replBannerLines 返回启动提示。
@@ -545,26 +526,15 @@ func replGuideBox() string {
 	return styleGuideBox.Render(strings.Join(tips, "\n"))
 }
 
-// inputBoxContentWidth 计算输入框可用于文本的实际宽度。
-func inputBoxContentWidth(totalWidth int) int {
-	content := totalWidth - inputBoxPadding*2
-	if content < 0 {
-		return 0
-	}
-	return content
-}
-
 // sanitizeLines 清理控制字符并拆分潜在的多行输入。
 func sanitizeLines(lines []string) []string {
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
 		var parts []string
-		// 保留显式的空行（防止被 splitLines 吞掉）
 		if line == "" {
 			parts = []string{""}
 		} else {
 			parts = splitLines(line)
-			// 如果 line 非空但 parts 为空（例如仅包含换行符），也视为空行保留
 			if len(parts) == 0 {
 				parts = []string{""}
 			}
@@ -572,13 +542,8 @@ func sanitizeLines(lines []string) []string {
 
 		for _, part := range parts {
 			s := sanitizeLine(part)
-
-			// 检查是否为视觉空行（去除 ANSI 码后为空）
 			isVisualEmpty := isVisualEmptyLine(s)
-
-			// 压缩连续空行
 			if isVisualEmpty {
-				// 强制将其视为空字符串处理，避免残留仅含 ANSI 码的行占据高度
 				s = ""
 				if len(out) > 0 && out[len(out)-1] == "" {
 					continue
@@ -590,32 +555,24 @@ func sanitizeLines(lines []string) []string {
 	return out
 }
 
-// ansiRegex 匹配常见的 ANSI 转义序列
-// 包括 CSI (如 \x1b[0m, \x1b[?25h) 和 G0/G1 charset (如 \x1b(B)
 var ansiRegex = regexp.MustCompile("\x1b\\[[0-9;?]*[a-zA-Z]|\x1b\\([0-9A-Za-z]")
 
-// stripANSI 移除字符串中的 ANSI 转义序列。
 func stripANSI(s string) string {
 	return ansiRegex.ReplaceAllString(s, "")
 }
 
-// isVisualEmptyLine 判断一行在去除 ANSI 转义后是否为空白。
 func isVisualEmptyLine(line string) bool {
 	stripped := stripANSI(line)
 	return strings.TrimSpace(stripped) == ""
 }
 
-// sanitizeLine 移除 \r 等控制字符，避免破坏终端输出。
-// 注意：这里必须保留 ANSI 转义序列（ESC, 0x1b），否则颜色会退化为纯文本（例如显示成 "1;96m" / "0m"）。
 func sanitizeLine(line string) string {
 	line = strings.ReplaceAll(line, "\r", "")
 	line = strings.ReplaceAll(line, "\t", "    ")
 	return strings.Map(func(r rune) rune {
-		// 保留 ANSI ESC 序列
 		if r == '\x1b' {
 			return r
 		}
-		// 过滤其他不可见控制字符
 		if r < 32 {
 			return -1
 		}
@@ -629,7 +586,6 @@ var (
 	tuiLogMu   sync.Mutex
 )
 
-// writeTUILog 将 TUI 输出写入指定日志文件，便于离线排查渲染效果。
 func writeTUILog(lines []string) {
 	path := getTUILogPath()
 	if path == "" || len(lines) == 0 {
@@ -651,7 +607,6 @@ func writeTUILog(lines []string) {
 	_, _ = f.WriteString(payload)
 }
 
-// getTUILogPath 读取日志路径并缓存，避免频繁读取环境变量。
 func getTUILogPath() string {
 	tuiLogOnce.Do(func() {
 		tuiLogPath = strings.TrimSpace(os.Getenv("CHASE_TUI_LOG_PATH"))
@@ -659,7 +614,6 @@ func getTUILogPath() string {
 	return tuiLogPath
 }
 
-// formatTUILogPayload 格式化日志内容，必要时移除 ANSI 码。
 func formatTUILogPayload(lines []string, plain bool) string {
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
