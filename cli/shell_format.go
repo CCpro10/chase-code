@@ -23,3 +23,12 @@ func formatShellResult(result *shellExecResult) []string {
 	}
 	return lines
 }
+
+// splitLines 安全拆分文本行，移除末尾多余换行但保留中间的空行。
+func splitLines(s string) []string {
+	s = strings.TrimSuffix(s, "\n")
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, "\n")
+}

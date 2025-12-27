@@ -1,4 +1,4 @@
-package cli
+package tui
 
 import (
 	"strings"
@@ -40,7 +40,7 @@ func TestNormalizeMarkdownForTUI_BulletOnlyLine(t *testing.T) {
 
 func TestRenderMarkdown_UserSample(t *testing.T) {
 	input := "1. 看项目\n\n    • 看目录里有哪些文件和子目录\n\n    • 打开某个文件看内容\n\n    • 在整个项目里搜索某个关键字或正则"
-	rendered := renderMarkdownToANSI(input, 80)
+	rendered := RenderMarkdownToANSI(input, 80)
 	assert.NotEmpty(t, rendered)
 }
 

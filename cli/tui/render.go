@@ -1,4 +1,4 @@
-package cli
+package tui
 
 import (
 	"fmt"
@@ -37,10 +37,10 @@ func getMarkdownRenderer(wordWrap int) *glamour.TermRenderer {
 	return mdRenderer
 }
 
-// renderMarkdownToANSI 将 Markdown 渲染为 ANSI 文本。
+// RenderMarkdownToANSI 将 Markdown 渲染为 ANSI 文本。
 // - wordWrap<=0 时让 glamour 使用默认策略（或不强制换行）。
 // - 渲染失败时回退为原文。
-func renderMarkdownToANSI(md string, wordWrap int) string {
+func RenderMarkdownToANSI(md string, wordWrap int) string {
 	md = normalizeMarkdownForTUI(md)
 	md = strings.TrimRight(md, "\n")
 	if strings.TrimSpace(md) == "" {
@@ -492,7 +492,7 @@ func formatAgentText(message string) []string {
 	if strings.TrimSpace(message) == "" {
 		return nil
 	}
-	rendered := renderMarkdownToANSI(message, 0)
+	rendered := RenderMarkdownToANSI(message, 0)
 	return splitLines(rendered)
 }
 

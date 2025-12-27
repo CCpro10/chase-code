@@ -1,4 +1,4 @@
-package cli
+package tui
 
 import (
 	"strings"
@@ -22,7 +22,7 @@ func streamLinesForTest(deltas []string, width int) []string {
 
 // fullLinesForTest 渲染完整 Markdown 并返回去除 ANSI 的行。
 func fullLinesForTest(input string, width int) []string {
-	rendered := renderMarkdownToANSI(input, width)
+	rendered := RenderMarkdownToANSI(input, width)
 	return normalizeStreamTestLines(splitLines(rendered))
 }
 
@@ -92,7 +92,7 @@ func TestSanitizeLines(t *testing.T) {
 // TestSanitizeLines_StripANSI 验证 sanitizeLines 是否能识别仅包含 ANSI 码的行并将其视为空行处理。
 func TestSanitizeLines_StripANSI(t *testing.T) {
 	// 模拟场景：
-	// renderMarkdownToANSI 产生了一些包含颜色重置码的行，虽然视觉上是空行，但字符串不为空。
+	// RenderMarkdownToANSI 产生了一些包含颜色重置码的行，虽然视觉上是空行，但字符串不为空。
 	input := []string{
 		"Line 1",
 		"\x1b[0m",       // ANSI reset code, visually empty

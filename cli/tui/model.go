@@ -1,4 +1,4 @@
-package cli
+package tui
 
 import (
 	"fmt"
@@ -23,6 +23,7 @@ const (
 type replModel struct {
 	input              textinput.Model
 	events             <-chan server.Event
+	dispatcher         Dispatcher
 	pendingApprovalID  string
 	exiting            bool
 	width              int
@@ -32,8 +33,9 @@ type replModel struct {
 	autoExitOnTurnDone bool
 
 	// 补全列表相关
+	allSuggestions  []Suggestion
 	showSuggestions bool
-	suggestions     []CLICommand
+	suggestions     []Suggestion
 	suggestionIdx   int
 
 	// 流式 Markdown 渲染状态
@@ -53,23 +55,23 @@ type replAutoRunMsg struct {
 }
 
 type replDispatchMsg struct {
-	result replDispatchResult
+	result DispatchResult
 	err    error
 }
 
-// runReplTUI 启动基于 Bubble Tea 的交互终端（仅保留输入框渲染）。
-func runReplTUI(events <-chan server.Event, initialInput string) error {
+// Run 启动基于 Bubble Tea 的交互终端（仅保留输入框渲染）。
+func Run(events <-chan server.Event, initialInput string, dispatcher Dispatcher, suggestions []Suggestion) error {
 	if events == nil {
 		return fmt.Errorf("事件通道未初始化")
 	}
-	model := newReplModel(events, initialInput)
+	model := newReplModel(events, initialInput, dispatcher, suggestions)
 	program := tea.NewProgram(model)
 	_, err := program.Run()
 	return err
 }
 
 // newReplModel 构造 TUI 模型。
-func newReplModel(events <-chan server.Event, initialInput string) replModel {
+func newReplModel(events <-chan server.Event, initialInput string, dispatcher Dispatcher, suggestions []Suggestion) replModel {
 	input := textinput.New()
 	input.Prompt = "chase> "
 	input.PromptStyle = stylePrompt
@@ -80,6 +82,8 @@ func newReplModel(events <-chan server.Event, initialInput string) replModel {
 	return replModel{
 		input:              input,
 		events:             events,
+		dispatcher:         dispatcher,
+		allSuggestions:     suggestions,
 		initialInput:       initialInput,
 		autoExitOnTurnDone: strings.TrimSpace(os.Getenv("CHASE_TUI_EXIT_ON_DONE")) != "",
 	}
@@ -162,7 +166,7 @@ func (m replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		echo := []string{styleUser.Render("> " + msg.input)}
 		return m, tea.Batch(
 			printReplLinesCmd(echo),
-			replDispatchCmd(msg.input, m.pendingApprovalID),
+			m.replDispatchCmd(msg.input, m.pendingApprovalID),
 		)
 	case replDispatchMsg:
 		return m.handleDispatch(msg)
@@ -207,10 +211,10 @@ func (m *replModel) updateSuggestions() {
 	}
 
 	prefix := strings.TrimPrefix(val, "/")
-	var matches []CLICommand
+	var matches []Suggestion
 	newSelectedIdx := -1
 
-	for _, cmd := range ListCommands() {
+	for _, cmd := range m.allSuggestions {
 		matched := false
 		if strings.HasPrefix(cmd.Name(), prefix) {
 			matched = true
@@ -299,21 +303,21 @@ func (m replModel) handleEnter() (tea.Model, tea.Cmd) {
 	echo := []string{styleUser.Render("> " + line)}
 	return m, tea.Batch(
 		printReplLinesCmd(echo),
-		replDispatchCmd(line, m.pendingApprovalID),
+		m.replDispatchCmd(line, m.pendingApprovalID),
 	)
 }
 
 // handleDispatch 处理命令执行结果并决定是否退出。
 func (m replModel) handleDispatch(msg replDispatchMsg) (tea.Model, tea.Cmd) {
-	lines := make([]string, 0, len(msg.result.lines)+1)
+	lines := make([]string, 0, len(msg.result.Lines)+1)
 	if msg.err != nil {
 		lines = append(lines, styleError.Render("错误: "+msg.err.Error()))
 	}
-	if len(msg.result.lines) > 0 {
-		lines = append(lines, msg.result.lines...)
+	if len(msg.result.Lines) > 0 {
+		lines = append(lines, msg.result.Lines...)
 	}
 	cmd := printReplLinesCmd(lines)
-	if msg.result.quit {
+	if msg.result.Quit {
 		m.exiting = true
 		if cmd == nil {
 			return m, tea.Quit
@@ -335,9 +339,12 @@ func listenForReplEvent(ch <-chan server.Event) tea.Cmd {
 }
 
 // replDispatchCmd 在后台处理用户输入，避免阻塞 UI。
-func replDispatchCmd(line string, pendingApprovalID string) tea.Cmd {
+func (m replModel) replDispatchCmd(line string, pendingApprovalID string) tea.Cmd {
 	return func() tea.Msg {
-		result, err := dispatchReplInput(line, pendingApprovalID)
+		if m.dispatcher == nil {
+			return replDispatchMsg{err: fmt.Errorf("dispatcher not initialized")}
+		}
+		result, err := m.dispatcher(line, pendingApprovalID)
 		return replDispatchMsg{result: result, err: err}
 	}
 }
@@ -422,7 +429,7 @@ func (m *replModel) streamCommitCompleteLines() []string {
 	}
 
 	source := m.streamBuffer[:lastNewline+1]
-	rendered := renderMarkdownToANSI(source, m.streamWrapWidth)
+	rendered := RenderMarkdownToANSI(source, m.streamWrapWidth)
 	lines := splitLines(rendered)
 	if len(lines) == 0 {
 		return nil
@@ -462,7 +469,7 @@ func (m *replModel) flushStreamFinal(final string) []string {
 		source += "\n"
 	}
 
-	rendered := renderMarkdownToANSI(source, m.streamWrapWidth)
+	rendered := RenderMarkdownToANSI(source, m.streamWrapWidth)
 	lines := splitLines(rendered)
 	if len(lines) == 0 || m.streamCommittedLineCount >= len(lines) {
 		return nil

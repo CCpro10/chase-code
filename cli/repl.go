@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"chase-code/cli/tui"
 	"chase-code/config"
 	"chase-code/server"
 	"chase-code/server/llm"
@@ -152,7 +153,19 @@ func initToolRouter() ([]servertools.ToolSpec, *servertools.ToolRouter) {
 
 func runRepl(initialInput string) error {
 	events := getReplEvents()
-	return runReplTUI(events, initialInput)
+
+	dispatcher := func(input string, pendingApprovalID string) (tui.DispatchResult, error) {
+		return dispatchReplInput(input, pendingApprovalID)
+	}
+
+	// 将 CLICommand 列表转换为 tui.Suggestion 列表
+	allCmds := ListCommands()
+	suggestions := make([]tui.Suggestion, len(allCmds))
+	for i, c := range allCmds {
+		suggestions[i] = c
+	}
+
+	return tui.Run(events, initialInput, dispatcher, suggestions)
 }
 
 func isAllowedWhileAgentRunning(line string) bool {
@@ -174,15 +187,10 @@ func isAllowedWhileAgentRunning(line string) bool {
 	}
 }
 
-type replDispatchResult struct {
-	lines []string
-	quit  bool
-}
-
 // dispatchReplInput 根据输入内容分发命令并返回渲染所需的输出。
-func dispatchReplInput(line string, pendingApprovalID string) (replDispatchResult, error) {
+func dispatchReplInput(line string, pendingApprovalID string) (tui.DispatchResult, error) {
 	if strings.TrimSpace(line) == "" {
-		return replDispatchResult{}, nil
+		return tui.DispatchResult{}, nil
 	}
 
 	if handled, result, err := handleApprovalShortcut(line, pendingApprovalID); handled {
@@ -190,29 +198,29 @@ func dispatchReplInput(line string, pendingApprovalID string) (replDispatchResul
 	}
 
 	if isAgentRunning() && !isAllowedWhileAgentRunning(line) {
-		return replDispatchResult{}, fmt.Errorf("当前有任务在执行，请先处理审批或等待完成")
+		return tui.DispatchResult{}, fmt.Errorf("当前有任务在执行，请先处理审批或等待完成")
 	}
 
 	if hasCommandPrefix(line) {
 		return handleReplCommand(line, pendingApprovalID)
 	}
-	return replDispatchResult{}, startAgentTurn(line)
+	return tui.DispatchResult{}, startAgentTurn(line)
 }
 
 // handleApprovalShortcut 处理 y/s 快捷审批输入。
-func handleApprovalShortcut(line string, pendingApprovalID string) (bool, replDispatchResult, error) {
+func handleApprovalShortcut(line string, pendingApprovalID string) (bool, tui.DispatchResult, error) {
 	if !isApprovalShortcut(line) {
-		return false, replDispatchResult{}, nil
+		return false, tui.DispatchResult{}, nil
 	}
 	if pendingApprovalID == "" {
 		if isAgentRunning() {
-			return true, replDispatchResult{lines: []string{"当前没有待审批请求"}}, nil
+			return true, tui.DispatchResult{Lines: []string{"当前没有待审批请求"}}, nil
 		}
-		return false, replDispatchResult{}, nil
+		return false, tui.DispatchResult{}, nil
 	}
 	approved := strings.EqualFold(line, "y")
 	msg, err := sendApproval(pendingApprovalID, approved)
-	return true, replDispatchResult{lines: []string{msg}}, err
+	return true, tui.DispatchResult{Lines: []string{msg}}, err
 }
 
 // isApprovalShortcut 判断输入是否为 y/s 快捷审批。
@@ -221,45 +229,45 @@ func isApprovalShortcut(line string) bool {
 }
 
 // handleReplCommand 解析 / 开头的命令并生成输出。
-func handleReplCommand(line string, pendingApprovalID string) (replDispatchResult, error) {
+func handleReplCommand(line string, pendingApprovalID string) (tui.DispatchResult, error) {
 	cmd := parseReplCommand(line)
 	if cmd.name == "" {
-		return replDispatchResult{}, nil
+		return tui.DispatchResult{}, nil
 	}
 
 	switch cmd.name {
 	case "q", "quit", "exit":
-		return replDispatchResult{quit: true}, nil
+		return tui.DispatchResult{Quit: true}, nil
 	case "help":
-		return replDispatchResult{lines: replHelpLines()}, nil
+		return tui.DispatchResult{Lines: replHelpLines()}, nil
 	case "model":
 		lines, err := handleModelCommand(cmd.args)
-		return replDispatchResult{lines: lines}, err
+		return tui.DispatchResult{Lines: lines}, err
 	case "shell":
 		lines, err := handleShellCommand(cmd.args)
-		return replDispatchResult{lines: lines}, err
+		return tui.DispatchResult{Lines: lines}, err
 	case "agent":
-		return replDispatchResult{}, handleAgentCommand(cmd.args)
+		return tui.DispatchResult{}, handleAgentCommand(cmd.args)
 	case "resume":
 		lines, err := handleResumeCommand(cmd.args)
-		return replDispatchResult{lines: lines}, err
+		return tui.DispatchResult{Lines: lines}, err
 	case "compact":
 		lines, err := handleCompactCommand(cmd.args)
-		return replDispatchResult{lines: lines}, err
+		return tui.DispatchResult{Lines: lines}, err
 	case "approvals":
 		lines, err := handleApprovalsCommand(cmd.args)
-		return replDispatchResult{lines: lines}, err
+		return tui.DispatchResult{Lines: lines}, err
 	case "approve":
 		lines, err := handleApprovalCommand(cmd.args, true)
-		return replDispatchResult{lines: lines}, err
+		return tui.DispatchResult{Lines: lines}, err
 	case "reject":
 		lines, err := handleApprovalCommand(cmd.args, false)
-		return replDispatchResult{lines: lines}, err
+		return tui.DispatchResult{Lines: lines}, err
 	case "y", "s":
 		lines, err := handleApprovalShortcutCommand(cmd.name, pendingApprovalID)
-		return replDispatchResult{lines: lines}, err
+		return tui.DispatchResult{Lines: lines}, err
 	default:
-		return replDispatchResult{}, fmt.Errorf("未知 repl 命令: %s", cmd.name)
+		return tui.DispatchResult{}, fmt.Errorf("未知 repl 命令: %s", cmd.name)
 	}
 }
 
@@ -281,6 +289,7 @@ func parseReplCommand(line string) replCommand {
 }
 
 // handleModelCommand 实现 /model 命令：
+//
 //   - /model           显示所有可用模型及当前使用的模型；
 //   - /model <alias>   切换到指定别名的模型。
 func handleModelCommand(args []string) ([]string, error) {
@@ -399,7 +408,7 @@ func handleCompactCommand(args []string) ([]string, error) {
 	}
 
 	// 摘要按 Markdown 渲染，提升 TUI 可读性。
-	rendered := renderMarkdownToANSI(summary, 0)
+	rendered := tui.RenderMarkdownToANSI(summary, 0)
 
 	return []string{
 		"上下文压缩成功！",
