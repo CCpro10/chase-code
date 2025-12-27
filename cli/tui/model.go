@@ -220,11 +220,6 @@ func (m replModel) View() string {
 	}
 
 	listView := m.list.View()
-	listView = lipgloss.NewStyle().
-		Border(asciiBorder).
-		BorderForeground(lipgloss.Color("8")).
-		Padding(0, 1).
-		Render(listView)
 
 	// 补全列表放在输入框下方
 	return lipgloss.JoinVertical(lipgloss.Left, inputView, listView)
@@ -506,12 +501,7 @@ func (m *replModel) resize(width int) {
 		m.streamWrapWidth = width
 	}
 
-	// list 的内部宽度（外层还会再包一层边框）
-	w := width - 4
-	if w < 0 {
-		w = 0
-	}
-	m.list.SetWidth(w)
+	m.list.SetWidth(width)
 }
 
 // replBannerLines 返回启动提示。
