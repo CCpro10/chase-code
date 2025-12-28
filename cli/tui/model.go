@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 
 	"chase-code/server"
 )
@@ -36,6 +37,13 @@ type replModel struct {
 	streamBuffer             string // 原始流式 Markdown 累积内容
 	streamCommittedLineCount int    // 已提交的渲染行数
 	streamWrapWidth          int
+
+	// 终端尺寸，用于输入法光标定位与布局计算。
+	windowWidth  int
+	windowHeight int
+
+	// 输入法光标跟踪器，保证真实光标位置正确。
+	imeCursor *imeCursorTracker
 }
 
 // suggestionItem 实现 list.Item 接口，用于补全列表。
@@ -68,18 +76,23 @@ func Run(events <-chan server.Event, initialInput string, dispatcher Dispatcher,
 	if events == nil {
 		return fmt.Errorf("事件通道未初始化")
 	}
-	model := newReplModel(events, initialInput, dispatcher, suggestions)
-	program := tea.NewProgram(model)
+	imeCursor := newIMECursorTracker()
+	output := newIMECursorWriter(os.Stdout, imeCursor)
+	model := newReplModel(events, initialInput, dispatcher, suggestions, imeCursor)
+	program := tea.NewProgram(model, tea.WithOutput(output))
 	_, err := program.Run()
 	return err
 }
 
 // newReplModel 构造 TUI 模型。
-func newReplModel(events <-chan server.Event, initialInput string, dispatcher Dispatcher, suggestions []Suggestion) replModel {
+func newReplModel(events <-chan server.Event, initialInput string, dispatcher Dispatcher, suggestions []Suggestion, imeCursor *imeCursorTracker) replModel {
 	// 初始化 Input
 	input := textinput.New()
 	input.Prompt = ""
 	input.TextStyle = styleInput
+	// 让光标样式与输入区背景一致，避免光标被“吞掉”误判为停在起始位置。
+	input.Cursor.Style = styleInput
+	input.Cursor.TextStyle = styleInput
 	input.CursorStyle = styleInput
 	input.Focus()
 
@@ -109,6 +122,7 @@ func newReplModel(events <-chan server.Event, initialInput string, dispatcher Di
 		initialInput:       initialInput,
 		autoExitOnTurnDone: strings.TrimSpace(os.Getenv("CHASE_TUI_EXIT_ON_DONE")) != "",
 		allSuggestions:     suggestions,
+		imeCursor:          imeCursor,
 	}
 }
 
@@ -131,67 +145,105 @@ func (m replModel) Init() tea.Cmd {
 func (m replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		m.resize(msg.Width)
-		return m, cmd
-
+		return m.handleWindowSizeMsg(msg)
 	case tea.KeyMsg:
-		// 补全列表可见时，优先处理 list 导航/选择
-		if m.showList {
-			switch msg.Type {
-			case tea.KeyUp, tea.KeyDown:
-				var cmd tea.Cmd
-				m.list, cmd = m.list.Update(msg)
-				return m, cmd
-			case tea.KeyTab, tea.KeyEnter:
-				if it, ok := m.list.SelectedItem().(suggestionItem); ok {
-					m.input.SetValue("/" + it.suggestion.Name() + " ")
-					m.input.CursorEnd()
-					m.showList = false
-				}
-				return m, nil
-			case tea.KeyEsc:
-				m.showList = false
-				return m, nil
-			default:
-			}
-		}
-
-		switch msg.Type {
-		case tea.KeyCtrlC, tea.KeyCtrlD:
-			m.exiting = true
-			return m, tea.Quit
-		case tea.KeyEnter:
-			return m.handleEnter()
-		}
-
+		return m.handleKeyMsg(msg)
 	case replEventMsg:
-		lines := m.applyEvent(msg.event)
-		cmd := printReplLinesCmd(lines)
-		if m.autoExitOnTurnDone && shouldExitAfterEvent(msg.event) {
-			m.exiting = true
-			if cmd == nil {
-				return m, tea.Quit
-			}
-			return m, tea.Sequence(cmd, tea.Quit)
-		}
-		return m, tea.Batch(
-			listenForReplEvent(m.events),
-			cmd,
-		)
+		return m.handleReplEventMsg(msg)
 	case replEventClosedMsg:
-		return m, printReplLinesCmd([]string{styleDim.Render("[event] 通道已关闭")})
+		return m.handleReplEventClosedMsg()
 	case replAutoRunMsg:
-		echo := []string{styleUser.Render("> " + msg.input)}
-		return m, tea.Batch(
-			printReplLinesCmd(echo),
-			m.replDispatchCmd(msg.input, m.pendingApprovalID),
-		)
+		return m.handleAutoRunMsg(msg)
 	case replDispatchMsg:
 		return m.handleDispatch(msg)
 	}
+	return m.handleInputMsg(msg)
+}
 
+// handleWindowSizeMsg 处理窗口尺寸变化并同步输入框与列表布局。
+func (m replModel) handleWindowSizeMsg(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	// 输入框需要接收窗口尺寸消息以更新内部宽度与光标定位。
+	m.input, cmd = m.input.Update(msg)
+	// 更新补全列表宽度与流式渲染的 wrap 宽度。
+	m.resize(msg.Width, msg.Height)
+	return m, cmd
+}
+
+// handleKeyMsg 处理键盘输入，优先消费补全列表相关按键。
+func (m replModel) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.showList {
+		if model, cmd, handled := m.handleListKeyMsg(msg); handled {
+			return model, cmd
+		}
+	}
+
+	switch msg.Type {
+	case tea.KeyCtrlC, tea.KeyCtrlD:
+		m.exiting = true
+		return m, tea.Quit
+	case tea.KeyEnter:
+		return m.handleEnter()
+	}
+
+	return m.handleInputMsg(msg)
+}
+
+// handleListKeyMsg 处理补全列表的导航、选择与关闭。
+func (m replModel) handleListKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
+	switch msg.Type {
+	case tea.KeyUp, tea.KeyDown:
+		var cmd tea.Cmd
+		m.list, cmd = m.list.Update(msg)
+		return m, cmd, true
+	case tea.KeyTab, tea.KeyEnter:
+		if it, ok := m.list.SelectedItem().(suggestionItem); ok {
+			m.input.SetValue("/" + it.suggestion.Name() + " ")
+			m.input.CursorEnd()
+			m.showList = false
+		}
+		return m, nil, true
+	case tea.KeyEsc:
+		m.showList = false
+		return m, nil, true
+	default:
+		return m, nil, false
+	}
+}
+
+// handleReplEventMsg 处理来自后端的事件并决定是否自动退出。
+func (m replModel) handleReplEventMsg(msg replEventMsg) (tea.Model, tea.Cmd) {
+	lines := m.applyEvent(msg.event)
+	cmd := printReplLinesCmd(lines)
+	if m.autoExitOnTurnDone && shouldExitAfterEvent(msg.event) {
+		m.exiting = true
+		if cmd == nil {
+			return m, tea.Quit
+		}
+		return m, tea.Sequence(cmd, tea.Quit)
+	}
+	return m, tea.Batch(
+		listenForReplEvent(m.events),
+		cmd,
+	)
+}
+
+// handleReplEventClosedMsg 输出事件通道关闭提示。
+func (m replModel) handleReplEventClosedMsg() (tea.Model, tea.Cmd) {
+	return m, printReplLinesCmd([]string{styleDim.Render("[event] 通道已关闭")})
+}
+
+// handleAutoRunMsg 处理启动时自动输入的指令。
+func (m replModel) handleAutoRunMsg(msg replAutoRunMsg) (tea.Model, tea.Cmd) {
+	echo := []string{styleUser.Render("> " + msg.input)}
+	return m, tea.Batch(
+		printReplLinesCmd(echo),
+		m.replDispatchCmd(msg.input, m.pendingApprovalID),
+	)
+}
+
+// handleInputMsg 将消息交给输入框处理并刷新补全列表。
+func (m replModel) handleInputMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	m.updateSuggestions()
@@ -211,9 +263,11 @@ func (m replModel) resolveStreamWrapWidth() int {
 // View 渲染输入框组件。
 func (m replModel) View() string {
 	if m.exiting {
+		m.updateIMECursorTracker(false)
 		return ""
 	}
 
+	m.updateIMECursorTracker(true)
 	inputView := m.input.View()
 	if !m.showList {
 		return inputView
@@ -223,6 +277,53 @@ func (m replModel) View() string {
 
 	// 补全列表放在输入框下方
 	return lipgloss.JoinVertical(lipgloss.Left, inputView, listView)
+}
+
+// updateIMECursorTracker 在渲染阶段同步真实光标位置，供输入法定位使用。
+func (m replModel) updateIMECursorTracker(active bool) {
+	if m.imeCursor == nil {
+		return
+	}
+	if !active || !m.input.Focused() {
+		m.imeCursor.Set(false, 0, 0)
+		return
+	}
+
+	upLines := 0
+	if m.showList {
+		upLines = m.list.Height()
+	}
+	if m.windowHeight > 0 && upLines >= m.windowHeight {
+		upLines = m.windowHeight - 1
+		if upLines < 0 {
+			upLines = 0
+		}
+	}
+
+	col := m.inputCursorColumn()
+	m.imeCursor.Set(true, upLines, col)
+}
+
+// inputCursorColumn 计算输入框光标的可视列位置。
+func (m replModel) inputCursorColumn() int {
+	pos := m.input.Position()
+	if pos <= 0 {
+		return 0
+	}
+
+	runes := []rune(m.input.Value())
+	if pos > len(runes) {
+		pos = len(runes)
+	}
+
+	col := runewidth.StringWidth(string(runes[:pos]))
+	if m.windowWidth > 0 && col >= m.windowWidth {
+		col = m.windowWidth - 1
+	}
+	if col < 0 {
+		return 0
+	}
+	return col
 }
 
 // updateSuggestions 根据当前输入更新补全列表。
@@ -491,10 +592,15 @@ func (m *replModel) resetStreamState() {
 }
 
 // resize 根据窗口尺寸调整输入框与补全列表的宽度。
-func (m *replModel) resize(width int) {
+func (m *replModel) resize(width int, height int) {
 	if width < 0 {
 		width = 0
 	}
+	if height < 0 {
+		height = 0
+	}
+	m.windowWidth = width
+	m.windowHeight = height
 	if width < 20 {
 		m.streamWrapWidth = 20
 	} else {
