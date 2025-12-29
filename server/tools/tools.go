@@ -30,75 +30,35 @@ func ParseToolCallsJSON(raw string) ([]ToolCall, error) {
 
 // DefaultToolSpecs 返回 chase-code 默认暴露给 LLM 的工具集合。
 var (
-	toolParamsShell = json.RawMessage(`{
+	toolParamsShellCommand = json.RawMessage(`{
   "type": "object",
   "properties": {
     "command": {
       "type": "string",
-      "description": "要执行的 shell 命令（在用户工作目录下）"
+      "description": "The shell script to execute in the user's default shell"
+    },
+    "justification": {
+      "type": "string",
+      "description": "Only set if sandbox_permissions is \"require_escalated\". 1-sentence explanation of why we want to run this command."
+    },
+    "login": {
+      "type": "boolean",
+      "description": "Whether to run the shell with login shell semantics. Defaults to true."
+    },
+    "sandbox_permissions": {
+      "type": "string",
+      "description": "Sandbox permissions for the command. Set to \"require_escalated\" to request running without sandbox restrictions; defaults to \"use_default\"."
     },
     "timeout_ms": {
-      "type": "integer",
-      "description": "超时时间（毫秒）。建议值 60000。",
-      "minimum": 1
+      "type": "number",
+      "description": "The timeout for the command in milliseconds"
     },
-    "policy": {
+    "workdir": {
       "type": "string",
-      "description": "权限策略：'workspace'=仅限工程目录；'readonly'=只读；'full'=无限制。建议默认 'workspace'。",
-      "enum": ["full", "readonly", "workspace"]
+      "description": "The working directory to execute the command in"
     }
   },
-  "required": ["command", "timeout_ms", "policy"],
-  "additionalProperties": false
-}`)
-
-	toolParamsReadFile = json.RawMessage(`{
-  "type": "object",
-  "properties": {
-    "path": {
-      "type": "string",
-      "description": "要读取的文件路径（相对或绝对路径）"
-    },
-    "max_bytes": {
-      "type": "integer",
-      "description": "最大读取字节数。建议值 524288 (512KB)。",
-      "minimum": 1
-    }
-  },
-  "required": ["path", "max_bytes"],
-  "additionalProperties": false
-}`)
-
-	toolParamsListDir = json.RawMessage(`{
-  "type": "object",
-  "properties": {
-    "path": {
-      "type": "string",
-      "description": "要列出的目录路径（相对或绝对路径）"
-    }
-  },
-  "required": ["path"],
-  "additionalProperties": false
-}`)
-
-	toolParamsGrepFiles = json.RawMessage(`{
-  "type": "object",
-  "properties": {
-    "root": {
-      "type": "string",
-      "description": "搜索的起始目录（如 '.'）"
-    },
-    "pattern": {
-      "type": "string",
-      "description": "要匹配的正则或文本模式"
-    },
-    "max_matches": {
-      "type": "integer",
-      "description": "最大返回匹配行数。建议值 200。",
-      "minimum": 1
-    }
-  },
-  "required": ["root", "pattern", "max_matches"],
+  "required": ["command"],
   "additionalProperties": false
 }`)
 
@@ -110,30 +70,14 @@ var (
 )
 
 func DefaultToolSpecs() []ToolSpec {
+	shellStrict := false
 	return []ToolSpec{
 		{
 			Kind:        ToolKindFunction,
-			Name:        "shell",
-			Description: "执行 shell 命令。",
-			Parameters:  toolParamsShell,
-		},
-		{
-			Kind:        ToolKindFunction,
-			Name:        "read_file",
-			Description: "读取文件内容。",
-			Parameters:  toolParamsReadFile,
-		},
-		{
-			Kind:        ToolKindFunction,
-			Name:        "list_dir",
-			Description: "列出目录内容。",
-			Parameters:  toolParamsListDir,
-		},
-		{
-			Kind:        ToolKindFunction,
-			Name:        "grep_files",
-			Description: "使用 ripgrep 在代码中查找匹配行。用于搜索代码、查询理解项目结构。",
-			Parameters:  toolParamsGrepFiles,
+			Name:        "shell_command",
+			Description: "Runs a shell command and returns its output.\n- Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary.",
+			Parameters:  toolParamsShellCommand,
+			Strict:      &shellStrict,
 		},
 		{
 			Kind:        ToolKindCustom,
@@ -159,6 +103,7 @@ type ToolSpec struct {
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
 	Format      json.RawMessage `json:"format,omitempty"`
+	Strict      *bool           `json:"strict,omitempty"`
 }
 
 // ToolKind 对应工具的类别，参考 codex 的 ToolSpec。

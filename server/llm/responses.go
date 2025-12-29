@@ -175,12 +175,16 @@ func (c *ResponsesClient) buildTools(tools []ToolSpec) []responses.ToolUnionPara
 		}
 		var paramsMap map[string]any
 		if err := json.Unmarshal(t.Parameters, &paramsMap); err == nil {
+			strictValue := true
+			if t.Strict != nil {
+				strictValue = *t.Strict
+			}
 			sdkTools = append(sdkTools, responses.ToolUnionParam{
 				OfFunction: &responses.FunctionToolParam{
 					Name:        t.Name,
 					Description: param.NewOpt(t.Description),
 					Parameters:  paramsMap,
-					Strict:      param.NewOpt(true),
+					Strict:      param.NewOpt(strictValue),
 				},
 			})
 		}

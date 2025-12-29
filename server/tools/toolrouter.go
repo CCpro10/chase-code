@@ -66,16 +66,10 @@ func (r *ToolRouter) Specs() []ToolSpec {
 
 func (r *ToolRouter) Execute(ctx context.Context, call ToolCall) (ToolResult, error) {
 	switch call.ToolName {
-	case "shell":
+	case "shell", "shell_command":
 		return r.execShell(ctx, call)
-	case "read_file":
-		return r.execReadFile(call)
-	case "edit_file":
-		return r.execEditFile(call)
-	case "list_dir":
-		return r.execListDir(call)
-	case "grep_files":
-		return r.execGrepFiles(call)
+	case "read_file", "edit_file", "list_dir", "grep_files":
+		return ToolResult{}, fmt.Errorf("工具已禁用: %s", call.ToolName)
 	case "apply_patch":
 		return r.execApplyPatch(call)
 	default:
@@ -94,18 +88,22 @@ func (r *ToolRouter) Execute(ctx context.Context, call ToolCall) (ToolResult, er
 // ---------------- shell ----------------
 
 type shellArgs struct {
-	Command   string `json:"command"`
-	TimeoutMs int    `json:"timeout_ms,omitempty"`
-	Policy    string `json:"policy,omitempty"`
+	Command            string  `json:"command"`
+	Justification      string  `json:"justification,omitempty"`
+	Login              *bool   `json:"login,omitempty"`
+	SandboxPermissions string  `json:"sandbox_permissions,omitempty"`
+	TimeoutMs          float64 `json:"timeout_ms,omitempty"`
+	Workdir            string  `json:"workdir,omitempty"`
+	Policy             string  `json:"policy,omitempty"`
 }
 
 func (r *ToolRouter) execShell(_ context.Context, call ToolCall) (ToolResult, error) {
 	var args shellArgs
 	if err := json.Unmarshal(call.Arguments, &args); err != nil {
-		return ToolResult{}, fmt.Errorf("解析 shell 参数失败: %w", err)
+		return ToolResult{}, fmt.Errorf("解析 %s 参数失败: %w", call.ToolName, err)
 	}
 	if strings.TrimSpace(args.Command) == "" {
-		return ToolResult{}, fmt.Errorf("shell 工具需要非空 command 字段")
+		return ToolResult{}, fmt.Errorf("%s 工具需要非空 command 字段", call.ToolName)
 	}
 
 	policy := SandboxWorkspaceWrite
@@ -116,6 +114,9 @@ func (r *ToolRouter) execShell(_ context.Context, call ToolCall) (ToolResult, er
 		}
 		policy = p
 	}
+	if args.SandboxPermissions == "require_escalated" {
+		// TODO: 对接审批/沙箱升级逻辑，目前保持默认策略。
+	}
 
 	shell := DetectUserShell()
 	if shell.Kind == ShellUnknown {
@@ -124,13 +125,24 @@ func (r *ToolRouter) execShell(_ context.Context, call ToolCall) (ToolResult, er
 
 	timeout := 10 * time.Second
 	if args.TimeoutMs > 0 {
-		timeout = time.Duration(args.TimeoutMs) * time.Millisecond
+		timeout = time.Duration(int64(args.TimeoutMs)) * time.Millisecond
 	}
 
-	shellArgs := shell.DeriveExecArgs(args.Command, true)
+	login := true
+	if args.Login != nil {
+		login = *args.Login
+	}
+	shellArgs := shell.DeriveExecArgs(args.Command, login)
 	cwd, err := os.Getwd()
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("获取当前工作目录失败: %w", err)
+	}
+	if strings.TrimSpace(args.Workdir) != "" {
+		if filepath.IsAbs(args.Workdir) {
+			cwd = args.Workdir
+		} else {
+			cwd = filepath.Join(cwd, args.Workdir)
+		}
 	}
 	params := ExecParams{Command: shellArgs, Cwd: cwd, Timeout: timeout, Env: os.Environ()}
 
@@ -147,7 +159,7 @@ func (r *ToolRouter) execShell(_ context.Context, call ToolCall) (ToolResult, er
 	}
 	summary := fmt.Sprintf("command=%q exit_code=%d duration=%s timed_out=%v", args.Command, res.ExitCode, res.Duration, res.TimedOut)
 	toolOutput := output + "\n---\n" + summary
-	return ToolResult{ToolName: "shell", Output: toolOutput}, nil
+	return ToolResult{ToolName: call.ToolName, Output: toolOutput}, nil
 }
 
 // ---------------- read_file ----------------
