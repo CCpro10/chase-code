@@ -99,6 +99,21 @@ func (s *Session) ResetHistoryWithSystemPrompt(systemPrompt string) {
 	})
 }
 
+// AppendEnvironmentContext appends a codex-style environment context message.
+func (s *Session) AppendEnvironmentContext(contextText string) {
+	if s == nil {
+		return
+	}
+	if strings.TrimSpace(contextText) == "" {
+		return
+	}
+	s.history = append(s.history, ResponseItem{
+		Type: ResponseItemMessage,
+		Role: RoleUser,
+		Text: contextText,
+	})
+}
+
 type turnContext struct {
 	baseCtx  context.Context
 	cm       *ContextManager

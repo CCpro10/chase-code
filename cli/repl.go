@@ -107,6 +107,7 @@ func initReplAgentSession(events chan server.Event) (*replAgentSession, error) {
 	}
 	as := server.NewSession(client, router, server.ChanEventSink{Ch: events}, maxSteps)
 	as.ResetHistoryWithSystemPrompt(systemPrompt)
+	as.AppendEnvironmentContext(server.FormatEnvironmentContext(server.DefaultEnvironmentContext()))
 
 	return &replAgentSession{
 		session: as,
