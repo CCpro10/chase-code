@@ -228,11 +228,12 @@ func (m replModel) handleListKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 			m.input.CursorEnd()
 			m.updateInputLayout()
 			m.showList = false
+			return m, m.refreshWindowCmd(), true
 		}
 		return m, nil, true
 	case tea.KeyEsc:
 		m.showList = false
-		return m, nil, true
+		return m, m.refreshWindowCmd(), true
 	default:
 		return m, nil, false
 	}
@@ -271,10 +272,14 @@ func (m replModel) handleAutoRunMsg(msg replAutoRunMsg) (tea.Model, tea.Cmd) {
 
 // handleInputMsg 将消息交给输入框处理并刷新补全列表。
 func (m replModel) handleInputMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
+	wasShowList := m.showList
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	m.updateInputLayout()
 	m.updateSuggestions()
+	if wasShowList && !m.showList {
+		return m, tea.Batch(cmd, m.refreshWindowCmd())
+	}
 	return m, cmd
 }
 
@@ -453,6 +458,20 @@ func (m replModel) handleEnter() (tea.Model, tea.Cmd) {
 		printReplLinesCmd(echo),
 		m.replDispatchCmd(raw, m.pendingApprovalID),
 	)
+}
+
+// refreshWindowCmd 发送窗口尺寸消息，触发渲染器重绘。
+// tea.WindowSizeMsg 会触发 Bubble Tea 的 尺寸变更流程，渲染器会重
+// 算布局并 重置/扩展渲染缓冲，从而强制整屏重绘。补全列表从显示变隐藏时，屏幕高度/内容行数瞬
+// 间变化，差分渲染有机会遗漏底部一行（边框底边）。我们“伪造”一次窗口尺寸消息，相当于告诉渲
+// 染器“需要重新铺满整屏”，因此底边会被重新绘制出来
+func (m replModel) refreshWindowCmd() tea.Cmd {
+	if m.windowWidth <= 0 || m.windowHeight <= 0 {
+		return nil
+	}
+	return func() tea.Msg {
+		return tea.WindowSizeMsg{Width: m.windowWidth, Height: m.windowHeight}
+	}
 }
 
 // updateInputLayout 根据内容更新输入框高度与视口偏移。
