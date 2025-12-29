@@ -18,9 +18,7 @@ const (
 	EventAgentTextDone  EventKind = "agent_text_done"  // 一轮回答完成
 
 	// 工具调用相关
-	EventToolStarted     EventKind = "tool_started"      // 某个工具开始执行
 	EventToolOutputDelta EventKind = "tool_output_delta" // 工具输出的增量内容（当前一次性发送）
-	EventToolFinished    EventKind = "tool_finished"     // 某个工具执行结束
 
 	// 补丁审批相关
 	EventPatchApprovalRequest EventKind = "patch_approval_request" // 需要用户确认的补丁

@@ -418,18 +418,12 @@ func (s *Session) emitToolOutput(step int, toolName, output string) {
 		ToolName: toolName,
 		Message:  output,
 	})
-	s.Sink.SendEvent(Event{
-		Kind:     EventToolFinished,
-		Time:     time.Now(),
-		Step:     step,
-		ToolName: toolName,
-	})
 }
 
 // emitToolError 输出工具失败事件。
 func (s *Session) emitToolError(step int, toolName string, err error) {
 	s.Sink.SendEvent(Event{
-		Kind:     EventToolFinished,
+		Kind:     EventToolOutputDelta,
 		Time:     time.Now(),
 		Step:     step,
 		ToolName: toolName,
@@ -511,14 +505,8 @@ func (s *Session) handlePatchDecision(ctx context.Context, call servertools.Tool
 	}
 }
 
-// executePatchTool 执行补丁工具调用，并发出开始事件。
+// executePatchTool 执行补丁工具调用。
 func (s *Session) executePatchTool(ctx context.Context, call servertools.ToolCall, step int) (ResponseItem, error) {
-	s.Sink.SendEvent(Event{
-		Kind:     EventToolStarted,
-		Time:     time.Now(),
-		Step:     step,
-		ToolName: call.ToolName,
-	})
 	res, err := s.Router.Execute(ctx, call)
 	if err != nil {
 		return ResponseItem{}, err
@@ -536,7 +524,7 @@ func (s *Session) rejectPatch(call servertools.ToolCall, step int, reason string
 		reason = "补丁被安全策略拒绝"
 	}
 	s.Sink.SendEvent(Event{
-		Kind:     EventToolFinished,
+		Kind:     EventToolOutputDelta,
 		Time:     time.Now(),
 		Step:     step,
 		ToolName: call.ToolName,

@@ -385,12 +385,8 @@ func formatEvent(ev server.Event) []string {
 		return formatTurnFinished(ev.Step, ev.Message)
 	case server.EventTurnError:
 		return formatTurnError(ev.Message)
-	case server.EventToolStarted:
-		return formatToolStarted(ev.ToolName)
 	case server.EventToolOutputDelta:
 		return formatToolOutput(ev.ToolName, ev.Message)
-	case server.EventToolFinished:
-		return formatToolFinished(ev.ToolName, ev.Message)
 	case server.EventPatchApprovalRequest:
 		return formatPatchApprovalRequest(ev)
 	case server.EventPatchApprovalResult:
@@ -405,11 +401,6 @@ func formatEvent(ev server.Event) []string {
 // formatTurnStarted 渲染 turn 开始提示。
 func formatTurnStarted() []string {
 	return []string{styleMagenta.Render("[turn] 开始")}
-}
-
-// formatToolStarted 渲染工具开始执行事件。
-func formatToolStarted(toolName string) []string {
-	return []string{styleYellow.Render(fmt.Sprintf("    [tool %s] 开始执行", toolName))}
 }
 
 // formatToolOutput 渲染工具输出事件。
@@ -434,7 +425,7 @@ func formatShellToolOutput(message string) []string {
 	output, summary := splitToolOutput(message)
 	command := parseShellCommand(summary)
 	header := "      " + command
-	lines := []string{styleDim.Render(header)}
+	lines := []string{styleYellow.Render(header)}
 	body := output
 	if !shouldShowFullToolOutput("shell_command", output) {
 		preview := truncateToolOutputLines(output, toolOutputPreviewLines)
@@ -474,17 +465,6 @@ func parseShellCommand(summary string) string {
 		return raw
 	}
 	return unquoted
-}
-
-// formatToolFinished 渲染工具结束事件。
-func formatToolFinished(toolName, message string) []string {
-	if message != "" {
-		return []string{styleGreen.Render(fmt.Sprintf("    [tool %s 完成] %s", toolName, message))}
-	}
-	if toolName == "" {
-		return nil
-	}
-	return []string{styleGreen.Render(fmt.Sprintf("    [tool %s 完成]", toolName))}
 }
 
 // truncateToolOutputLines 仅保留前几行工具输出，其余用摘要行表示。
