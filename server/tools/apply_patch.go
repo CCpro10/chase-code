@@ -7,19 +7,10 @@ import (
 	"strings"
 )
 
-// LegacyPatchArgs describes legacy string-replace edit/apply_patch arguments.
-type LegacyPatchArgs struct {
-	File string `json:"file"`
-	From string `json:"from"`
-	To   string `json:"to"`
-	All  bool   `json:"all,omitempty"`
-}
-
 // ApplyPatchRequest describes the parsed apply_patch request.
 type ApplyPatchRequest struct {
 	Patch   string
 	Summary PatchSummary
-	Legacy  *LegacyPatchArgs
 }
 
 // PatchSummary summarizes files touched by a patch.
@@ -35,20 +26,11 @@ func (s PatchSummary) HasDeletes() bool {
 	return len(s.Deleted) > 0
 }
 
-// ParseApplyPatchArguments parses apply_patch arguments with legacy compatibility.
+// ParseApplyPatchArguments parses apply_patch arguments.
 func ParseApplyPatchArguments(args json.RawMessage) (ApplyPatchRequest, error) {
 	trimmed := bytes.TrimSpace(args)
 	if len(trimmed) == 0 {
 		return ApplyPatchRequest{}, fmt.Errorf("apply_patch 参数为空")
-	}
-
-	if legacy, ok := parseLegacyPatch(trimmed); ok {
-		return ApplyPatchRequest{
-			Legacy: &legacy,
-			Summary: PatchSummary{
-				Paths: []string{legacy.File},
-			},
-		}, nil
 	}
 
 	patchText, err := extractPatchText(trimmed)
@@ -108,18 +90,6 @@ func SummarizePatch(patch Patch) PatchSummary {
 	}
 
 	return summary
-}
-
-// parseLegacyPatch tries to parse legacy string-replace arguments.
-func parseLegacyPatch(args []byte) (LegacyPatchArgs, bool) {
-	var legacy LegacyPatchArgs
-	if err := json.Unmarshal(args, &legacy); err != nil {
-		return LegacyPatchArgs{}, false
-	}
-	if strings.TrimSpace(legacy.File) == "" || strings.TrimSpace(legacy.From) == "" {
-		return LegacyPatchArgs{}, false
-	}
-	return legacy, true
 }
 
 // extractPatchText extracts the raw patch text.

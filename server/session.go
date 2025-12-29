@@ -488,12 +488,7 @@ func (s *Session) executeApplyPatchWithSafety(ctx context.Context, call serverto
 
 // evaluatePatchDecision 执行安全评估，并应用 SessionConfig 的审批策略。
 func (s *Session) evaluatePatchDecision(req servertools.ApplyPatchRequest) servertools.PatchSafetyDecision {
-	var decision servertools.PatchSafetyDecision
-	if req.Legacy != nil {
-		decision = servertools.EvaluateSimplePatchSafety(req.Legacy.File, req.Legacy.From, req.Legacy.To, req.Legacy.All)
-	} else {
-		decision = servertools.EvaluatePatchSafety(req.Summary)
-	}
+	decision := servertools.EvaluatePatchSafety(req.Summary)
 	return s.applyPatchApprovalPolicy(decision)
 }
 

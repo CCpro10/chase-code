@@ -167,18 +167,6 @@ func (r *ToolRouter) execPatchCommon(toolName string, call ToolCall) (ToolResult
 		return ToolResult{}, fmt.Errorf("解析 %s 参数失败: %w", toolName, err)
 	}
 
-	if req.Legacy != nil {
-		abs, err := filepath.Abs(req.Legacy.File)
-		if err != nil {
-			return ToolResult{}, fmt.Errorf("解析文件路径失败: %w", err)
-		}
-		if err := ApplyEdit(abs, req.Legacy.From, req.Legacy.To, req.Legacy.All); err != nil {
-			return ToolResult{}, err
-		}
-		msg := fmt.Sprintf("已更新文件: %s", abs)
-		return ToolResult{ToolName: toolName, Output: msg}, nil
-	}
-
 	cwd, err := os.Getwd()
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("获取工作目录失败: %w", err)
