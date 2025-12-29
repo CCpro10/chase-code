@@ -221,6 +221,8 @@ func DefaultToolSpecs() []ToolSpec {
 
 // ToolCall 描述一条来自 LLM 的工具调用请求，对应约定的 JSON 协议。
 type ToolCall struct {
+	// Kind 标记工具调用的来源类型，便于区分 function/custom 工具。
+	Kind      ToolKind        `json:"kind,omitempty"`
 	ToolName  string          `json:"tool_name"`
 	Arguments json.RawMessage `json:"arguments"`
 	CallID    string          `json:"call_id,omitempty"`

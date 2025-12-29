@@ -18,15 +18,14 @@ func resolveApplyPatchToolMode(model *llm.LLMModel) servertools.ApplyPatchToolMo
 	if model == nil {
 		return servertools.ApplyPatchToolModeFunction
 	}
-	modelName := strings.ToLower(strings.TrimSpace(model.Model))
-	if strings.Contains(modelName, "gpt-oss") {
-		return servertools.ApplyPatchToolModeFunction
-	}
-
 	switch model.Client.(type) {
 	case *llm.ResponsesClient:
 		return servertools.ApplyPatchToolModeCustom
 	default:
+		modelName := strings.ToLower(strings.TrimSpace(model.Model))
+		if strings.Contains(modelName, "gpt-oss") {
+			return servertools.ApplyPatchToolModeFunction
+		}
 		return servertools.ApplyPatchToolModeFunction
 	}
 }

@@ -260,6 +260,7 @@ func (c *CompletionsClient) extractToolCalls(calls []openai.ChatCompletionMessag
 			continue
 		}
 		toolCalls = append(toolCalls, ToolCall{
+			Kind:      servertools.ToolKindFunction,
 			ToolName:  tc.Function.Name,
 			Arguments: json.RawMessage(tc.Function.Arguments),
 			CallID:    tc.ID,

@@ -14,6 +14,7 @@ import (
 	"github.com/openai/openai-go/shared"
 	"github.com/openai/openai-go/shared/constant"
 
+	servertools "chase-code/server/tools"
 	"chase-code/server/utils"
 )
 
@@ -107,6 +108,7 @@ func (c *ResponsesClient) Stream(ctx context.Context, p Prompt) *LLMStream {
 }
 
 func (c *ResponsesClient) buildParams(p Prompt) responses.ResponseNewParams {
+	toolModes := buildToolCallModes(p.Tools)
 	inputItems := make([]responses.ResponseInputItemUnionParam, 0)
 
 	items := p.Items
@@ -124,25 +126,19 @@ func (c *ResponsesClient) buildParams(p Prompt) responses.ResponseNewParams {
 			}
 			if it.Role == RoleAssistant && len(it.ToolCalls) > 0 {
 				for _, call := range it.ToolCalls {
-					inputItems = append(inputItems, responses.ResponseInputItemParamOfFunctionCall(
-						string(call.Arguments),
-						call.CallID,
-						call.ToolName,
-					))
+					inputItems = append(inputItems, buildToolCallInputParam(call, toolModes))
 				}
 			}
 		case ResponseItemToolCall:
-			inputItems = append(inputItems, responses.ResponseInputItemParamOfFunctionCall(
-				string(it.ToolArguments),
-				it.CallID,
-				it.ToolName,
-			))
+			call := ToolCall{
+				ToolName:  it.ToolName,
+				Arguments: it.ToolArguments,
+				CallID:    it.CallID,
+			}
+			inputItems = append(inputItems, buildToolCallInputParam(call, toolModes))
 		case ResponseItemToolResult:
 			if it.ToolName != "" || it.ToolOutput != "" {
-				inputItems = append(inputItems, responses.ResponseInputItemParamOfFunctionCallOutput(
-					it.CallID,
-					truncateToolOutput(it.ToolOutput),
-				))
+				inputItems = append(inputItems, buildToolCallOutputParam(it.ToolName, it.CallID, truncateToolOutput(it.ToolOutput), toolModes))
 			}
 		}
 	}
@@ -164,6 +160,103 @@ func (c *ResponsesClient) buildParams(p Prompt) responses.ResponseNewParams {
 
 	log.Printf("build params: %s\n", utils.ToIndentJSONString(params))
 	return params
+}
+
+type toolCallMode string
+
+const (
+	toolCallModeFunction toolCallMode = "function"
+	toolCallModeCustom   toolCallMode = "custom"
+)
+
+func buildToolCallModes(tools []ToolSpec) map[string]toolCallMode {
+	out := make(map[string]toolCallMode, len(tools))
+	for _, t := range tools {
+		if strings.TrimSpace(t.Name) == "" {
+			continue
+		}
+		if t.Kind == servertools.ToolKindCustom && len(t.Format) > 0 {
+			out[t.Name] = toolCallModeCustom
+			continue
+		}
+		if len(t.Parameters) == 0 || string(t.Parameters) == "null" {
+			continue
+		}
+		out[t.Name] = toolCallModeFunction
+	}
+	return out
+}
+
+func resolveToolCallMode(call ToolCall, modes map[string]toolCallMode) toolCallMode {
+	switch call.Kind {
+	case servertools.ToolKindCustom:
+		return toolCallModeCustom
+	case servertools.ToolKindFunction:
+		return toolCallModeFunction
+	}
+	if mode, ok := modes[call.ToolName]; ok {
+		return mode
+	}
+	return toolCallModeFunction
+}
+
+func resolveToolOutputMode(toolName string, modes map[string]toolCallMode) toolCallMode {
+	if mode, ok := modes[toolName]; ok {
+		return mode
+	}
+	return toolCallModeFunction
+}
+
+func buildToolCallInputParam(call ToolCall, modes map[string]toolCallMode) responses.ResponseInputItemUnionParam {
+	mode := resolveToolCallMode(call, modes)
+	if mode == toolCallModeCustom {
+		return buildCustomToolCallInputParam(call)
+	}
+	return responses.ResponseInputItemParamOfFunctionCall(
+		string(call.Arguments),
+		call.CallID,
+		call.ToolName,
+	)
+}
+
+func buildToolCallOutputParam(toolName, callID, output string, modes map[string]toolCallMode) responses.ResponseInputItemUnionParam {
+	mode := resolveToolOutputMode(toolName, modes)
+	if mode == toolCallModeCustom {
+		return buildCustomToolCallOutputParam(callID, output)
+	}
+	return responses.ResponseInputItemParamOfFunctionCallOutput(callID, output)
+}
+
+func buildCustomToolCallInputParam(call ToolCall) responses.ResponseInputItemUnionParam {
+	payload := map[string]any{
+		"type":    "custom_tool_call",
+		"name":    call.ToolName,
+		"call_id": call.CallID,
+		// custom 工具使用 input 字段承载原始负载。
+		"input": json.RawMessage(call.Arguments),
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return responses.ResponseInputItemParamOfFunctionCall(
+			string(call.Arguments),
+			call.CallID,
+			call.ToolName,
+		)
+	}
+	return param.Override[responses.ResponseInputItemUnionParam](json.RawMessage(data))
+}
+
+func buildCustomToolCallOutputParam(callID, output string) responses.ResponseInputItemUnionParam {
+	payload := map[string]any{
+		"type":    "custom_tool_call_output",
+		"call_id": callID,
+		"output":  output,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return responses.ResponseInputItemParamOfFunctionCallOutput(callID, output)
+	}
+	return param.Override[responses.ResponseInputItemUnionParam](json.RawMessage(data))
 }
 
 func (c *ResponsesClient) buildTools(tools []ToolSpec) []responses.ToolUnionParam {
@@ -227,6 +320,7 @@ func (c *ResponsesClient) parseToolCall(item responses.ResponseOutputItemUnion) 
 	switch item.Type {
 	case "function_call", "tool_call":
 		return ToolCall{
+			Kind:      servertools.ToolKindFunction,
 			ToolName:  item.Name,
 			Arguments: normalizeSDKArguments(json.RawMessage(item.Arguments)),
 			CallID:    item.CallID,
@@ -276,6 +370,7 @@ func (c *ResponsesClient) parseCustomToolCall(item responses.ResponseOutputItemU
 	}
 
 	return ToolCall{
+		Kind:      servertools.ToolKindCustom,
 		ToolName:  name,
 		Arguments: normalizeSDKArguments(args),
 		CallID:    callID,
