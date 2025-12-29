@@ -9,17 +9,16 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
 
 	"chase-code/server"
 )
 
 // replModel 负责管理 TUI 的状态与渲染。
 type replModel struct {
-	input              textinput.Model
+	input              textarea.Model
 	list               list.Model
 	events             <-chan server.Event
 	dispatcher         Dispatcher
@@ -86,14 +85,23 @@ func Run(events <-chan server.Event, initialInput string, dispatcher Dispatcher,
 
 // newReplModel 构造 TUI 模型。
 func newReplModel(events <-chan server.Event, initialInput string, dispatcher Dispatcher, suggestions []Suggestion, imeCursor *imeCursorTracker) replModel {
-	// 初始化 Input
-	input := textinput.New()
+	// 初始化 textarea 作为输入框
+	input := textarea.New()
 	input.Prompt = ""
-	input.TextStyle = styleInput
+	input.ShowLineNumbers = false
+	input.SetHeight(1)
+	input.FocusedStyle.Base = styleInput
+	input.FocusedStyle.Text = styleInput
+	input.FocusedStyle.Prompt = styleInput
+	input.FocusedStyle.CursorLine = styleInput
+	input.FocusedStyle.CursorLineNumber = styleInput
+	input.FocusedStyle.LineNumber = styleInput
+	input.FocusedStyle.Placeholder = styleInput
+	input.FocusedStyle.EndOfBuffer = styleInput
+	input.BlurredStyle = input.FocusedStyle
 	// 让光标样式与输入区背景一致，避免光标被“吞掉”误判为停在起始位置。
 	input.Cursor.Style = styleInput
 	input.Cursor.TextStyle = styleInput
-	input.CursorStyle = styleInput
 	input.Focus()
 
 	// 初始化 list 作为补全面板
@@ -129,7 +137,7 @@ func newReplModel(events <-chan server.Event, initialInput string, dispatcher Di
 // Init 启动事件监听、光标闪烁，并输出启动提示。
 func (m replModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{
-		textinput.Blink,
+		textarea.Blink,
 		listenForReplEvent(m.events),
 		printReplLinesCmd(replBannerLines()),
 	}
@@ -162,12 +170,11 @@ func (m replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleWindowSizeMsg 处理窗口尺寸变化并同步输入框与列表布局。
 func (m replModel) handleWindowSizeMsg(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	// 输入框需要接收窗口尺寸消息以更新内部宽度与光标定位。
-	m.input, cmd = m.input.Update(msg)
+	// 同步 textarea 的宽度，避免光标与换行位置偏移。
+	m.input.SetWidth(msg.Width)
 	// 更新补全列表宽度与流式渲染的 wrap 宽度。
 	m.resize(msg.Width, msg.Height)
-	return m, cmd
+	return m, nil
 }
 
 // handleKeyMsg 处理键盘输入，优先消费补全列表相关按键。
@@ -300,30 +307,15 @@ func (m replModel) updateIMECursorTracker(active bool) {
 		}
 	}
 
-	col := m.inputCursorColumn()
-	m.imeCursor.Set(true, upLines, col)
-}
-
-// inputCursorColumn 计算输入框光标的可视列位置。
-func (m replModel) inputCursorColumn() int {
-	pos := m.input.Position()
-	if pos <= 0 {
-		return 0
-	}
-
-	runes := []rune(m.input.Value())
-	if pos > len(runes) {
-		pos = len(runes)
-	}
-
-	col := runewidth.StringWidth(string(runes[:pos]))
+	lineInfo := m.input.LineInfo()
+	col := lineInfo.CharOffset
 	if m.windowWidth > 0 && col >= m.windowWidth {
 		col = m.windowWidth - 1
 	}
 	if col < 0 {
-		return 0
+		col = 0
 	}
-	return col
+	m.imeCursor.Set(true, upLines, col)
 }
 
 // updateSuggestions 根据当前输入更新补全列表。
