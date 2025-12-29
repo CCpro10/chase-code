@@ -73,7 +73,11 @@ func (c *ResponsesClient) Stream(ctx context.Context, p Prompt) *LLMStream {
 				ch <- LLMEvent{Kind: LLMEventTextDelta, TextDelta: delta}
 			case "response.output_item.done":
 				item := ev.AsResponseOutputItemDone().Item
-				if call, ok := c.parseToolCall(item.Type, item.Name, item.Arguments, item.CallID); ok {
+
+				jsonStr, _ := json.Marshal(item)
+				log.Printf("[llm] stream item: %v", string(jsonStr))
+
+				if call, ok := c.parseToolCall(item); ok {
 					toolCalls = append(toolCalls, call)
 				}
 				if textBuilder.Len() == 0 && item.Type == "message" {
@@ -93,7 +97,7 @@ func (c *ResponsesClient) Stream(ctx context.Context, p Prompt) *LLMStream {
 			Message:   LLMMessage{Role: RoleAssistant, Content: fullText},
 			ToolCalls: toolCalls,
 		}
-		log.Printf("[llm] stream complete elapsed=%s len=%d tool_calls=%d", time.Since(start), len(fullText), len(toolCalls))
+		log.Printf("[llm] stream complete elapsed=%s len=%d tool_calls=%d  result=%v", time.Since(start), len(fullText), len(toolCalls), result)
 		ch <- LLMEvent{Kind: LLMEventCompleted, FullText: fullText, Result: result}
 	}()
 
@@ -162,6 +166,10 @@ func (c *ResponsesClient) buildParams(p Prompt) responses.ResponseNewParams {
 func (c *ResponsesClient) buildTools(tools []ToolSpec) []responses.ToolUnionParam {
 	var sdkTools []responses.ToolUnionParam
 	for _, t := range tools {
+		if raw, ok := buildCustomToolPayload(t); ok {
+			sdkTools = append(sdkTools, param.Override[responses.ToolUnionParam](raw))
+			continue
+		}
 		if len(t.Parameters) == 0 || string(t.Parameters) == "null" {
 			continue
 		}
@@ -187,7 +195,7 @@ func (c *ResponsesClient) extractOutput(output []responses.ResponseOutputItemUni
 		if text := c.extractText(item.Content, string(item.Role)); text != "" {
 			texts = append(texts, text)
 		}
-		if call, ok := c.parseToolCall(item.Type, item.Name, item.Arguments, item.CallID); ok {
+		if call, ok := c.parseToolCall(item); ok {
 			calls = append(calls, call)
 		}
 	}
@@ -207,13 +215,62 @@ func (c *ResponsesClient) extractText(content []responses.ResponseOutputMessageC
 	return strings.Join(parts, "")
 }
 
-func (c *ResponsesClient) parseToolCall(typ, name, args, callID string) (ToolCall, bool) {
-	if typ != "function_call" && typ != "tool_call" {
+// parseToolCall converts a response output item into a tool call when supported.
+func (c *ResponsesClient) parseToolCall(item responses.ResponseOutputItemUnion) (ToolCall, bool) {
+	switch item.Type {
+	case "function_call", "tool_call":
+		return ToolCall{
+			ToolName:  item.Name,
+			Arguments: normalizeSDKArguments(json.RawMessage(item.Arguments)),
+			CallID:    item.CallID,
+		}, true
+	case "custom_tool_call":
+		return c.parseCustomToolCall(item)
+	default:
 		return ToolCall{}, false
 	}
+}
+
+// parseCustomToolCall extracts input from custom_tool_call output items.
+func (c *ResponsesClient) parseCustomToolCall(item responses.ResponseOutputItemUnion) (ToolCall, bool) {
+	raw := item.RawJSON()
+	if raw == "" {
+		return ToolCall{}, false
+	}
+
+	var payload struct {
+		Name      string          `json:"name"`
+		CallID    string          `json:"call_id"`
+		Input     json.RawMessage `json:"input"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return ToolCall{}, false
+	}
+
+	name := payload.Name
+	if name == "" {
+		name = item.Name
+	}
+	callID := payload.CallID
+	if callID == "" {
+		callID = item.CallID
+	}
+
+	args := payload.Input
+	if len(args) == 0 {
+		args = payload.Arguments
+	}
+	if len(args) == 0 && item.Arguments != "" {
+		args = json.RawMessage(item.Arguments)
+	}
+	if name == "" || len(args) == 0 {
+		return ToolCall{}, false
+	}
+
 	return ToolCall{
 		ToolName:  name,
-		Arguments: normalizeSDKArguments(json.RawMessage(args)),
+		Arguments: normalizeSDKArguments(args),
 		CallID:    callID,
 	}, true
 }

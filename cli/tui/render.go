@@ -435,8 +435,12 @@ func formatToolOutput(toolName, message string) []string {
 		return nil
 	}
 	lines := []string{styleDim.Render(fmt.Sprintf("      [tool %s 输出]", toolName))}
-	preview := truncateToolOutputLines(message, toolOutputPreviewLines)
-	return append(lines, indentLines(strings.Join(preview, "\n"), 8)...)
+	body := message
+	if !shouldShowFullToolOutput(toolName, message) {
+		preview := truncateToolOutputLines(message, toolOutputPreviewLines)
+		body = strings.Join(preview, "\n")
+	}
+	return append(lines, indentLines(body, 8)...)
 }
 
 // formatToolFinished 渲染工具结束事件。
@@ -461,6 +465,17 @@ func truncateToolOutputLines(message string, maxLines int) []string {
 	summary := fmt.Sprintf("... (+%d line(s))", remaining)
 	out := append(lines[:maxLines], summary)
 	return out
+}
+
+// shouldShowFullToolOutput 对 apply_patch 的 diff 输出保留完整内容。
+func shouldShowFullToolOutput(toolName, message string) bool {
+	if toolName == "apply_patch" || toolName == "edit_file" {
+		return true
+	}
+	if strings.Contains(message, "*** Begin Patch") || strings.Contains(message, "diff --git") {
+		return true
+	}
+	return false
 }
 
 // formatPatchApprovalRequest 渲染补丁审批请求事件。

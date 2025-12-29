@@ -462,34 +462,23 @@ func previewLLMReplyForLog(s string) string {
 // executeApplyPatchWithSafety 对 apply_patch 调用进行安全评估和必要的人工审批，
 // 只有在补丁被认为安全或被用户明确批准的情况下才真正执行。
 func (s *Session) executeApplyPatchWithSafety(ctx context.Context, call servertools.ToolCall, step int) (ResponseItem, error) {
-	args, err := s.parseApplyPatchArgs(call)
+	req, err := servertools.ParseApplyPatchArguments(call.Arguments)
 	if err != nil {
 		return ResponseItem{}, err
 	}
 
-	decision := s.evaluatePatchDecision(args)
+	decision := s.evaluatePatchDecision(req)
 	return s.handlePatchDecision(ctx, call, step, decision)
 }
 
-type applyPatchArgs struct {
-	File string `json:"file"`
-	From string `json:"from"`
-	To   string `json:"to"`
-	All  bool   `json:"all"`
-}
-
-// parseApplyPatchArgs 解析 apply_patch 的参数。
-func (s *Session) parseApplyPatchArgs(call servertools.ToolCall) (applyPatchArgs, error) {
-	var args applyPatchArgs
-	if err := json.Unmarshal(call.Arguments, &args); err != nil {
-		return applyPatchArgs{}, fmt.Errorf("解析 apply_patch 参数失败: %w", err)
-	}
-	return args, nil
-}
-
 // evaluatePatchDecision 执行安全评估，并应用 SessionConfig 的审批策略。
-func (s *Session) evaluatePatchDecision(args applyPatchArgs) servertools.PatchSafetyDecision {
-	decision := servertools.EvaluateSimplePatchSafety(args.File, args.From, args.To, args.All)
+func (s *Session) evaluatePatchDecision(req servertools.ApplyPatchRequest) servertools.PatchSafetyDecision {
+	var decision servertools.PatchSafetyDecision
+	if req.Legacy != nil {
+		decision = servertools.EvaluateSimplePatchSafety(req.Legacy.File, req.Legacy.From, req.Legacy.To, req.Legacy.All)
+	} else {
+		decision = servertools.EvaluatePatchSafety(req.Summary)
+	}
 	return s.applyPatchApprovalPolicy(decision)
 }
 

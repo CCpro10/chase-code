@@ -139,7 +139,7 @@ func (c *CompletionsClient) Stream(ctx context.Context, p Prompt) *LLMStream {
 			finalResult.ToolCalls = finalToolCalls
 		}
 
-		log.Printf("[llm] stream complete elapsed=%s len=%d tool_calls=%d", time.Since(start), len(fullText), len(finalResult.ToolCalls))
+		log.Printf("[llm] stream complete elapsed=%s len=%d tool_calls=%d  result=%v", time.Since(start), len(fullText), len(finalResult.ToolCalls), finalResult)
 		ch <- LLMEvent{Kind: LLMEventCompleted, FullText: fullText, Result: finalResult}
 	}()
 
@@ -216,6 +216,10 @@ func (c *CompletionsClient) buildMessages(p Prompt) []openai.ChatCompletionMessa
 func (c *CompletionsClient) buildTools(tools []ToolSpec) []openai.ChatCompletionToolParam {
 	var sdkTools []openai.ChatCompletionToolParam
 	for _, t := range tools {
+		if raw, ok := buildCustomToolPayload(t); ok {
+			sdkTools = append(sdkTools, param.Override[openai.ChatCompletionToolParam](raw))
+			continue
+		}
 		if len(t.Parameters) == 0 || string(t.Parameters) == "null" {
 			continue
 		}

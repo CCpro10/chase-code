@@ -6,10 +6,10 @@ import (
 	"strings"
 )
 
-// ApplyEdit 模仿 codex 的 apply_patch 语义做了轻量增强：
+// ApplyEdit 是旧版基于字符串替换的编辑实现，保留用于兼容历史协议：
 //   - 保留原有文件权限位
 //   - 默认要求 from 片段在文件中唯一（All=false），否则报错，避免误改多处
-//   - 提示性错误信息，更方便让 LLM 调整补丁
+//   - 提示性错误信息，方便调整补丁
 func ApplyEdit(path, old, new string, replaceAll bool) error {
 	info, err := os.Stat(path)
 	if err != nil {

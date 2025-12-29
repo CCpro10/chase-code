@@ -17,6 +17,7 @@
 - 想了解项目结构 → 优先使用 list_dir 或 grep_files。
 - 想阅读/理解某个文件 → 使用 read_file。
 - 想做小范围修改 → 使用 apply_patch，修改前尽量先 read_file 确认上下文。
+- apply_patch 使用补丁格式（*** Begin Patch ... *** End Patch），不要包 JSON，路径必须为相对路径。
 - 想执行命令（如 go test / go build）→ 使用 shell，但要避免危险命令（删除系统文件、格式化磁盘等）。
 - 执行工具后、继续根据用户需求，选择其他工具、直到完成用户的任务。
 

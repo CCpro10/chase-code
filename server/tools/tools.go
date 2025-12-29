@@ -102,28 +102,10 @@ var (
   "additionalProperties": false
 }`)
 
-	toolParamsApplyPatch = json.RawMessage(`{
-  "type": "object",
-  "properties": {
-    "file": {
-      "type": "string",
-      "description": "要修改的文件路径（相对或绝对路径）"
-    },
-    "from": {
-      "type": "string",
-      "description": "待替换的唯一原始字符串片段"
-    },
-    "to": {
-      "type": "string",
-      "description": "替换后的新字符串片段"
-    },
-    "all": {
-      "type": "boolean",
-      "description": "是否替换所有匹配项。false 表示仅替换首个匹配（更安全），true 表示全部替换。"
-    }
-  },
-  "required": ["file", "from", "to", "all"],
-  "additionalProperties": false
+	toolFormatApplyPatch = json.RawMessage(`{
+  "type": "grammar",
+  "syntax": "lark",
+  "definition": "start: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF\nend_patch: \"*** End Patch\" LF?\n\nhunk: add_hunk | delete_hunk | update_hunk\nadd_hunk: \"*** Add File: \" filename LF add_line+\ndelete_hunk: \"*** Delete File: \" filename LF\nupdate_hunk: \"*** Update File: \" filename LF change_move? change?\n\nfilename: /(.+)/\nadd_line: \"+\" /(.*)/ LF -> line\n\nchange_move: \"*** Move to: \" filename LF\nchange: (change_context | change_line)+ eof_line?\nchange_context: (\"@@\" | \"@@ \" /(.+)/) LF\nchange_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\neof_line: \"*** End of File\" LF\n\n%import common.LF\n"
 }`)
 )
 
@@ -154,10 +136,10 @@ func DefaultToolSpecs() []ToolSpec {
 			Parameters:  toolParamsGrepFiles,
 		},
 		{
-			Kind:        ToolKindFunction,
+			Kind:        ToolKindCustom,
 			Name:        "apply_patch",
-			Description: "对单个文件应用修改（基于字符串替换）。",
-			Parameters:  toolParamsApplyPatch,
+			Description: "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+			Format:      toolFormatApplyPatch,
 		},
 	}
 }
@@ -176,6 +158,7 @@ type ToolSpec struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Format      json.RawMessage `json:"format,omitempty"`
 }
 
 // ToolKind 对应工具的类别，参考 codex 的 ToolSpec。

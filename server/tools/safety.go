@@ -16,7 +16,7 @@ type PatchSafetyDecision struct {
 	Paths  []string // 涉及到的文件路径摘要，便于在 CLI 中展示
 }
 
-// EvaluateSimplePatchSafety 针对当前基于字符串替换的 apply_patch 模式，
+// EvaluateSimplePatchSafety 针对旧版基于字符串替换的 apply_patch 模式，
 // 做一个保守的安全评估：
 //   - 默认视为安全；
 //   - 若 replaceAll 且 to 为空（批量删除），则要求用户确认；
@@ -39,5 +39,26 @@ func EvaluateSimplePatchSafety(filePath, from, to string, replaceAll bool) Patch
 	return PatchSafetyDecision{
 		Level: PatchSafe,
 		Paths: []string{filePath},
+	}
+}
+
+// EvaluatePatchSafety 针对 apply_patch 补丁格式做安全评估。
+func EvaluatePatchSafety(summary PatchSummary) PatchSafetyDecision {
+	paths := summary.Paths
+	if len(paths) == 0 {
+		paths = append(paths, summary.Added...)
+		paths = append(paths, summary.Modified...)
+		paths = append(paths, summary.Deleted...)
+	}
+	if summary.HasDeletes() {
+		return PatchSafetyDecision{
+			Level:  PatchAskUser,
+			Reason: "补丁包含文件删除操作，建议人工确认",
+			Paths:  paths,
+		}
+	}
+	return PatchSafetyDecision{
+		Level: PatchSafe,
+		Paths: paths,
 	}
 }

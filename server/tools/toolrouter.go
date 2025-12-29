@@ -179,13 +179,6 @@ func (r *ToolRouter) execReadFile(call ToolCall) (ToolResult, error) {
 
 // ---------------- edit/apply_patch ----------------
 
-type patchFileArgs struct {
-	File string `json:"file"`
-	From string `json:"from"`
-	To   string `json:"to"`
-	All  bool   `json:"all,omitempty"`
-}
-
 func (r *ToolRouter) execEditFile(call ToolCall) (ToolResult, error) {
 	// 保留 edit_file 作为 apply_patch 的别名，方便向后兼容。
 	return r.execPatchCommon("edit_file", call)
@@ -196,24 +189,32 @@ func (r *ToolRouter) execApplyPatch(call ToolCall) (ToolResult, error) {
 }
 
 func (r *ToolRouter) execPatchCommon(toolName string, call ToolCall) (ToolResult, error) {
-	var args patchFileArgs
-	if err := json.Unmarshal(call.Arguments, &args); err != nil {
+	req, err := ParseApplyPatchArguments(call.Arguments)
+	if err != nil {
 		return ToolResult{}, fmt.Errorf("解析 %s 参数失败: %w", toolName, err)
 	}
-	if strings.TrimSpace(args.File) == "" || strings.TrimSpace(args.From) == "" {
-		return ToolResult{}, fmt.Errorf("%s 需要 file 和 from 字段", toolName)
+
+	if req.Legacy != nil {
+		abs, err := filepath.Abs(req.Legacy.File)
+		if err != nil {
+			return ToolResult{}, fmt.Errorf("解析文件路径失败: %w", err)
+		}
+		if err := ApplyEdit(abs, req.Legacy.From, req.Legacy.To, req.Legacy.All); err != nil {
+			return ToolResult{}, err
+		}
+		msg := fmt.Sprintf("已更新文件: %s", abs)
+		return ToolResult{ToolName: toolName, Output: msg}, nil
 	}
 
-	abs, err := filepath.Abs(args.File)
+	cwd, err := os.Getwd()
 	if err != nil {
-		return ToolResult{}, fmt.Errorf("解析文件路径失败: %w", err)
+		return ToolResult{}, fmt.Errorf("获取工作目录失败: %w", err)
 	}
-	if err := ApplyEdit(abs, args.From, args.To, args.All); err != nil {
+	result, err := ApplyPatchText(cwd, req.Patch)
+	if err != nil {
 		return ToolResult{}, err
 	}
-
-	msg := fmt.Sprintf("已更新文件: %s", abs)
-	return ToolResult{ToolName: toolName, Output: msg}, nil
+	return ToolResult{ToolName: toolName, Output: formatPatchResultOutput(result)}, nil
 }
 
 // ---------------- list_dir ----------------
