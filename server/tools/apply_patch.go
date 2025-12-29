@@ -127,8 +127,12 @@ func extractPatchText(args []byte) (string, error) {
 	if json.Valid(args) {
 		var payload struct {
 			Patch string `json:"patch"`
+			Input string `json:"input"`
 		}
 		if err := json.Unmarshal(args, &payload); err == nil {
+			if patch := strings.TrimSpace(payload.Input); patch != "" {
+				return patch, nil
+			}
 			if patch := strings.TrimSpace(payload.Patch); patch != "" {
 				return patch, nil
 			}
@@ -146,7 +150,7 @@ func extractPatchText(args []byte) (string, error) {
 			return asString, nil
 		}
 
-		return "", fmt.Errorf("apply_patch 参数缺少 patch 字段")
+		return "", fmt.Errorf("apply_patch 参数缺少 input/patch 字段")
 	}
 
 	patch := strings.TrimSpace(string(args))

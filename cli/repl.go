@@ -94,12 +94,12 @@ func getReplEvents() chan server.Event {
 
 // initReplAgentSession 初始化 REPL 使用的 agent 会话。
 func initReplAgentSession(events chan server.Event) (*replAgentSession, error) {
-	client, err := initLLMClient()
+	model, client, err := initLLMClient()
 	if err != nil {
 		return nil, err
 	}
 
-	_, router := initToolRouter()
+	_, router := initToolRouter(model)
 	systemPrompt := server.BuildToolSystemPrompt(router.Specs())
 
 	if events == nil {
@@ -116,22 +116,22 @@ func initReplAgentSession(events chan server.Event) (*replAgentSession, error) {
 }
 
 // initLLMClient 构建 LLM 配置并初始化客户端。
-func initLLMClient() (llm.LLMClient, error) {
+func initLLMClient() (*llm.LLMModel, llm.LLMClient, error) {
 	model, err := llm.NewLLMModelFromEnv()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	client, err := llm.NewLLMClient(model)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	log.Printf("[config] %s", config.Get().Summary())
-	return client, nil
+	return model, client, nil
 }
 
 // initToolRouter 初始化本地工具并按需接入 MCP。
-func initToolRouter() ([]servertools.ToolSpec, *servertools.ToolRouter) {
-	tools := servertools.DefaultToolSpecs()
+func initToolRouter(model *llm.LLMModel) ([]servertools.ToolSpec, *servertools.ToolRouter) {
+	tools := server.BuildToolSpecsForModel(model)
 	router := servertools.NewToolRouter(tools)
 
 	// 可选：通过配置接入 MCP tools（仿照 codex 的 mcp-server 能力）

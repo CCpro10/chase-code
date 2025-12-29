@@ -7,7 +7,7 @@ chase-code is a local CLI agent inspired by the Codex experience. It helps you s
 ## Highlights
 
 - **Agent REPL (Bubble Tea TUI)**: an interactive terminal UI that drives multi-step tasks with tools.
-- **Local tools**: `shell`, `read_file`, `edit_file`, `apply_patch`, `list_dir`, `grep_files`.
+- **Local tools**: `shell_command`, `apply_patch`.
 - **Pluggable LLM providers**: OpenAI and Kimi (Moonshot, OpenAI-compatible).
 
 ## Requirements

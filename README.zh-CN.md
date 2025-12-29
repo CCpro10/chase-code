@@ -7,7 +7,7 @@ chase-code 是一个模仿 Codex 体验的本地命令行工具，通过「LLM +
 ## 功能亮点
 
 - **Agent REPL（Bubble Tea TUI）**：交互式终端 UI，支持多步任务驱动。
-- **本地工具**：`shell`、`read_file`、`edit_file`、`apply_patch`、`list_dir`、`grep_files`。
+- **本地工具**：`shell_command`、`apply_patch`。
 - **可插拔 LLM 提供商**：OpenAI、Kimi（Moonshot，兼容 OpenAI 接口）。
 
 ## 环境要求

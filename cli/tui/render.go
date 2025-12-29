@@ -469,7 +469,7 @@ func truncateToolOutputLines(message string, maxLines int) []string {
 
 // shouldShowFullToolOutput 对 apply_patch 的 diff 输出保留完整内容。
 func shouldShowFullToolOutput(toolName, message string) bool {
-	if toolName == "apply_patch" || toolName == "edit_file" {
+	if toolName == "apply_patch" {
 		return true
 	}
 	if strings.Contains(message, "*** Begin Patch") || strings.Contains(message, "diff --git") {

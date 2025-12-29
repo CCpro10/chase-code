@@ -15,7 +15,7 @@ import (
 // Run 是 chase-code 的 CLI 入口，负责解析子命令并调用 server 包的核心逻辑。
 // 模仿 codex 的体验：
 //   - 直接运行 `chase-code` 时，默认进入基于 agent 的 REPL；
-//   - 也可以通过子命令显式调用 shell/read/edit/repl。
+//   - 也可以通过子命令显式调用 shell/repl。
 func Run() {
 	// 初始化 LLM 配置
 	if err := llm.Init(); err != nil {
