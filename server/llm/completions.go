@@ -14,6 +14,8 @@ import (
 	"github.com/openai/openai-go/packages/param"
 	"github.com/openai/openai-go/shared"
 	"github.com/openai/openai-go/shared/constant"
+
+	"chase-code/server/utils"
 )
 
 // CompletionsClient 使用官方 openai-go SDK 的 Chat Completions API 与模型交互。
@@ -64,7 +66,6 @@ func (c *CompletionsClient) Stream(ctx context.Context, p Prompt) *LLMStream {
 
 	go func() {
 		defer close(ch)
-		start := time.Now()
 		params := c.buildParams(p)
 
 		s := c.client.Chat.Completions.NewStreaming(ctx, params)
@@ -138,8 +139,6 @@ func (c *CompletionsClient) Stream(ctx context.Context, p Prompt) *LLMStream {
 			}
 			finalResult.ToolCalls = finalToolCalls
 		}
-
-		log.Printf("[llm] stream complete elapsed=%s len=%d tool_calls=%d  result=%v", time.Since(start), len(fullText), len(finalResult.ToolCalls), finalResult)
 		ch <- LLMEvent{Kind: LLMEventCompleted, FullText: fullText, Result: finalResult}
 	}()
 
@@ -160,6 +159,7 @@ func (c *CompletionsClient) buildParams(p Prompt) openai.ChatCompletionNewParams
 		}
 	}
 
+	log.Printf("build params: %s\n", utils.ToIndentJSONString(params))
 	return params
 }
 
@@ -205,9 +205,15 @@ func (c *CompletionsClient) buildMessages(p Prompt) []openai.ChatCompletionMessa
 			}}
 			msgs = append(msgs, msg)
 		case ResponseItemToolResult:
-			if it.ToolName != "" || it.ToolOutput != "" {
-				msgs = append(msgs, openai.ToolMessage(it.CallID, truncateToolOutput(it.ToolOutput)))
+			if it.ToolName == "" && it.ToolOutput == "" {
+				continue
 			}
+			callID := strings.TrimSpace(it.CallID)
+			if callID == "" {
+				log.Printf("[llm] skip tool result: missing tool_call_id")
+				continue
+			}
+			msgs = append(msgs, openai.ToolMessage(truncateToolOutput(it.ToolOutput), callID))
 		}
 	}
 	return msgs

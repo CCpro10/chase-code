@@ -51,7 +51,7 @@ func initLLMLogger() {
 		return
 	}
 	log.SetOutput(f)
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.Lshortfile)
 	log.Printf("[llm] 使用日志文件: %s", path)
 }
 

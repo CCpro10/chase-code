@@ -13,6 +13,8 @@ import (
 	"github.com/openai/openai-go/responses"
 	"github.com/openai/openai-go/shared"
 	"github.com/openai/openai-go/shared/constant"
+
+	"chase-code/server/utils"
 )
 
 // ResponsesClient 使用官方 openai-go SDK 的 Responses API 与模型交互。
@@ -160,6 +162,7 @@ func (c *ResponsesClient) buildParams(p Prompt) responses.ResponseNewParams {
 		params.ToolChoice = responses.ResponseNewParamsToolChoiceUnion{OfToolChoiceMode: param.NewOpt(responses.ToolChoiceOptionsAuto)}
 	}
 
+	log.Printf("build params: %s\n", utils.ToIndentJSONString(params))
 	return params
 }
 
