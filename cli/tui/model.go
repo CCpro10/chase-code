@@ -7,14 +7,20 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	rw "github.com/mattn/go-runewidth"
+	"github.com/rivo/uniseg"
 
 	"chase-code/server"
 )
+
+const inputMaxLines = 10
 
 // replModel 负责管理 TUI 的状态与渲染。
 type replModel struct {
@@ -43,6 +49,9 @@ type replModel struct {
 
 	// 输入法光标跟踪器，保证真实光标位置正确。
 	imeCursor *imeCursorTracker
+
+	// 输入框视口偏移量，避免 IME 光标定位漂移。
+	inputViewportOffset int
 }
 
 // suggestionItem 实现 list.Item 接口，用于补全列表。
@@ -89,8 +98,14 @@ func newReplModel(events <-chan server.Event, initialInput string, dispatcher Di
 	input := textarea.New()
 	input.Prompt = ""
 	input.ShowLineNumbers = false
+	input.MaxHeight = inputMaxLines
 	input.SetHeight(1)
-	input.FocusedStyle.Base = styleInput
+	input.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter", "ctrl+j"))
+	inputBase := styleInput.
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("8")).
+		Padding(0, 1)
+	input.FocusedStyle.Base = inputBase
 	input.FocusedStyle.Text = styleInput
 	input.FocusedStyle.Prompt = styleInput
 	input.FocusedStyle.CursorLine = styleInput
@@ -172,6 +187,7 @@ func (m replModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m replModel) handleWindowSizeMsg(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	// 同步 textarea 的宽度，避免光标与换行位置偏移。
 	m.input.SetWidth(msg.Width)
+	m.updateInputLayout()
 	// 更新补全列表宽度与流式渲染的 wrap 宽度。
 	m.resize(msg.Width, msg.Height)
 	return m, nil
@@ -179,6 +195,9 @@ func (m replModel) handleWindowSizeMsg(msg tea.WindowSizeMsg) (tea.Model, tea.Cm
 
 // handleKeyMsg 处理键盘输入，优先消费补全列表相关按键。
 func (m replModel) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.Type == tea.KeyEnter && msg.Alt {
+		return m.handleInputMsg(msg)
+	}
 	if m.showList {
 		if model, cmd, handled := m.handleListKeyMsg(msg); handled {
 			return model, cmd
@@ -207,6 +226,7 @@ func (m replModel) handleListKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		if it, ok := m.list.SelectedItem().(suggestionItem); ok {
 			m.input.SetValue("/" + it.suggestion.Name() + " ")
 			m.input.CursorEnd()
+			m.updateInputLayout()
 			m.showList = false
 		}
 		return m, nil, true
@@ -253,6 +273,7 @@ func (m replModel) handleAutoRunMsg(msg replAutoRunMsg) (tea.Model, tea.Cmd) {
 func (m replModel) handleInputMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	m.updateInputLayout()
 	m.updateSuggestions()
 	return m, cmd
 }
@@ -300,6 +321,22 @@ func (m replModel) updateIMECursorTracker(active bool) {
 	if m.showList {
 		upLines = m.list.Height()
 	}
+	upLines += m.inputBottomOffset()
+
+	inputHeight := m.input.Height()
+	if inputHeight < 1 {
+		inputHeight = 1
+	}
+	cursorRow := m.inputCursorVisualRow()
+	cursorRowInView := cursorRow - m.inputViewportOffset
+	if cursorRowInView < 0 {
+		cursorRowInView = 0
+	}
+	if cursorRowInView >= inputHeight {
+		cursorRowInView = inputHeight - 1
+	}
+	upLines += inputHeight - 1 - cursorRowInView
+
 	if m.windowHeight > 0 && upLines >= m.windowHeight {
 		upLines = m.windowHeight - 1
 		if upLines < 0 {
@@ -308,7 +345,13 @@ func (m replModel) updateIMECursorTracker(active bool) {
 	}
 
 	lineInfo := m.input.LineInfo()
-	col := lineInfo.CharOffset
+	col := lineInfo.CharOffset + m.inputLeftOffset()
+	if promptWidth := lipgloss.Width(m.input.Prompt); promptWidth > 0 {
+		col += promptWidth
+	}
+	if m.input.ShowLineNumbers {
+		col += 4
+	}
 	if m.windowWidth > 0 && col >= m.windowWidth {
 		col = m.windowWidth - 1
 	}
@@ -321,7 +364,7 @@ func (m replModel) updateIMECursorTracker(active bool) {
 // updateSuggestions 根据当前输入更新补全列表。
 func (m *replModel) updateSuggestions() {
 	val := m.input.Value()
-	if !strings.HasPrefix(val, "/") || strings.Contains(val, " ") {
+	if !strings.HasPrefix(val, "/") || strings.IndexFunc(val, unicode.IsSpace) != -1 {
 		m.showList = false
 		return
 	}
@@ -398,16 +441,211 @@ func (m *replModel) updateSuggestions() {
 
 // handleEnter 处理回车输入并触发异步分发。
 func (m replModel) handleEnter() (tea.Model, tea.Cmd) {
-	line := strings.TrimSpace(m.input.Value())
+	raw := m.input.Value()
+	line := strings.TrimSpace(raw)
 	m.input.SetValue("")
+	m.updateInputLayout()
 	if line == "" {
 		return m, nil
 	}
-	echo := []string{styleUser.Render("> " + line)}
+	echo := []string{styleUser.Render("> " + raw)}
 	return m, tea.Batch(
 		printReplLinesCmd(echo),
-		m.replDispatchCmd(line, m.pendingApprovalID),
+		m.replDispatchCmd(raw, m.pendingApprovalID),
 	)
+}
+
+// updateInputLayout 根据内容更新输入框高度与视口偏移。
+func (m *replModel) updateInputLayout() {
+	height := m.inputVisualLineCount()
+	if height < 1 {
+		height = 1
+	}
+	if height > inputMaxLines {
+		height = inputMaxLines
+	}
+	if m.input.Height() != height {
+		m.input.SetHeight(height)
+	}
+	m.updateInputViewportOffset()
+}
+
+// updateInputViewportOffset 保持 IME 与 textarea 的垂直滚动对齐。
+func (m *replModel) updateInputViewportOffset() {
+	height := m.input.Height()
+	if height < 1 {
+		height = 1
+	}
+	totalLines := m.inputVisualLineCount()
+	cursorLine := m.inputCursorVisualRow()
+	offset := m.inputViewportOffset
+
+	minVisible := offset
+	maxVisible := offset + height - 1
+	if cursorLine < minVisible {
+		offset -= minVisible - cursorLine
+	} else if cursorLine > maxVisible {
+		offset += cursorLine - maxVisible
+	}
+
+	if offset < 0 {
+		offset = 0
+	}
+	maxOffset := totalLines - 1
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if offset > maxOffset {
+		offset = maxOffset
+	}
+	m.inputViewportOffset = offset
+}
+
+// inputVisualLineCount 计算 textarea 内容的可视行数（含软换行）。
+func (m replModel) inputVisualLineCount() int {
+	width := m.inputTextWidth()
+	if width <= 0 {
+		return 1
+	}
+	lines := strings.Split(m.input.Value(), "\n")
+	if len(lines) == 0 {
+		return 1
+	}
+	total := 0
+	for _, line := range lines {
+		total += wrappedLineCount([]rune(line), width)
+	}
+	if total < 1 {
+		return 1
+	}
+	return total
+}
+
+// inputCursorVisualRow 返回光标所在的可视行号（0-based）。
+func (m replModel) inputCursorVisualRow() int {
+	width := m.inputTextWidth()
+	if width <= 0 {
+		return 0
+	}
+	lines := strings.Split(m.input.Value(), "\n")
+	if len(lines) == 0 {
+		return 0
+	}
+	row := m.input.Line()
+	if row < 0 {
+		row = 0
+	}
+	if row >= len(lines) {
+		row = len(lines) - 1
+	}
+	total := 0
+	for i := 0; i < row; i++ {
+		total += wrappedLineCount([]rune(lines[i]), width)
+	}
+	lineInfo := m.input.LineInfo()
+	return total + lineInfo.RowOffset
+}
+
+// inputTextWidth 返回 textarea 内容区的可用宽度。
+func (m replModel) inputTextWidth() int {
+	width := m.input.Width()
+	if width <= 0 {
+		width = 1
+	}
+	return width
+}
+
+// inputLeftOffset 计算输入框左侧边框与内边距的列偏移。
+func (m replModel) inputLeftOffset() int {
+	frameHorizontal := m.input.FocusedStyle.Base.GetHorizontalFrameSize()
+	return frameHorizontal / 2
+}
+
+// inputBottomOffset 计算输入框底部边框与内边距占用的行数。
+func (m replModel) inputBottomOffset() int {
+	frameVertical := m.input.FocusedStyle.Base.GetVerticalFrameSize()
+	if frameVertical <= 0 {
+		return 0
+	}
+	return frameVertical / 2
+}
+
+// wrappedLineCount 计算一行文本在指定宽度下的软换行行数。
+func wrappedLineCount(runes []rune, width int) int {
+	if width <= 0 {
+		return 1
+	}
+	if len(runes) == 0 {
+		return 1
+	}
+	return len(wrapRunes(runes, width))
+}
+
+// wrapRunes 使用 textarea 的换行规则对文本进行软换行。
+func wrapRunes(runes []rune, width int) [][]rune {
+	if width <= 0 {
+		return [][]rune{{}}
+	}
+
+	lines := [][]rune{{}}
+	word := []rune{}
+	row := 0
+	spaces := 0
+
+	for _, r := range runes {
+		if unicode.IsSpace(r) {
+			spaces++
+		} else {
+			word = append(word, r)
+		}
+
+		if spaces > 0 {
+			if uniseg.StringWidth(string(lines[row]))+uniseg.StringWidth(string(word))+spaces > width {
+				row++
+				lines = append(lines, []rune{})
+				lines[row] = append(lines[row], word...)
+				lines[row] = append(lines[row], repeatSpaces(spaces)...)
+				spaces = 0
+				word = nil
+			} else {
+				lines[row] = append(lines[row], word...)
+				lines[row] = append(lines[row], repeatSpaces(spaces)...)
+				spaces = 0
+				word = nil
+			}
+		} else if len(word) > 0 {
+			lastCharLen := rw.RuneWidth(word[len(word)-1])
+			if uniseg.StringWidth(string(word))+lastCharLen > width {
+				if len(lines[row]) > 0 {
+					row++
+					lines = append(lines, []rune{})
+				}
+				lines[row] = append(lines[row], word...)
+				word = nil
+			}
+		}
+	}
+
+	if uniseg.StringWidth(string(lines[row]))+uniseg.StringWidth(string(word))+spaces >= width {
+		lines = append(lines, []rune{})
+		lines[row+1] = append(lines[row+1], word...)
+		spaces++
+		lines[row+1] = append(lines[row+1], repeatSpaces(spaces)...)
+	} else {
+		lines[row] = append(lines[row], word...)
+		spaces++
+		lines[row] = append(lines[row], repeatSpaces(spaces)...)
+	}
+
+	return lines
+}
+
+// repeatSpaces 生成指定数量的空格 rune 切片。
+func repeatSpaces(n int) []rune {
+	if n <= 0 {
+		return nil
+	}
+	return []rune(strings.Repeat(string(' '), n))
 }
 
 // handleDispatch 处理命令执行结果并决定是否退出。
