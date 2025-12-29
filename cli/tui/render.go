@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/lipgloss"
 
 	"chase-code/server"
 )
@@ -411,27 +412,31 @@ func formatToolOutput(toolName, message string) []string {
 	if toolName == "shell_command" || toolName == "shell" {
 		return formatShellToolOutput(message)
 	}
-	lines := []string{styleDim.Render(fmt.Sprintf("      [tool %s 输出]", toolName))}
+	lines := []string{styleDim.Render(fmt.Sprintf("    tool %s:", toolName))}
 	body := message
 	if !shouldShowFullToolOutput(toolName, message) {
 		preview := truncateToolOutputLines(message, toolOutputPreviewLines)
 		body = strings.Join(preview, "\n")
 	}
-	return append(lines, indentLines(body, 8)...)
+	bodyLines := indentLines(body, 6)
+	bodyLines = styleLines(bodyLines, styleToolOutput)
+	return append(lines, bodyLines...)
 }
 
 // formatShellToolOutput 渲染 shell_command 的输出，突出命令与参数。
 func formatShellToolOutput(message string) []string {
 	output, summary := splitToolOutput(message)
 	command := parseShellCommand(summary)
-	header := "      " + command
+	header := "    " + command
 	lines := []string{styleYellow.Render(header)}
 	body := output
 	if !shouldShowFullToolOutput("shell_command", output) {
 		preview := truncateToolOutputLines(output, toolOutputPreviewLines)
 		body = strings.Join(preview, "\n")
 	}
-	return append(lines, indentLines(body, 8)...)
+	bodyLines := indentLines(body, 6)
+	bodyLines = styleLines(bodyLines, styleToolOutput)
+	return append(lines, bodyLines...)
 }
 
 // splitToolOutput 将工具输出拆分为正文与摘要（summary）。
@@ -465,6 +470,17 @@ func parseShellCommand(summary string) string {
 		return raw
 	}
 	return unquoted
+}
+
+// styleLines 为每行应用统一样式，忽略空白行。
+func styleLines(lines []string, style lipgloss.Style) []string {
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		lines[i] = style.Render(line)
+	}
+	return lines
 }
 
 // truncateToolOutputLines 仅保留前几行工具输出，其余用摘要行表示。

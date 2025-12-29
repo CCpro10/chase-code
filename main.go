@@ -1,15 +1,10 @@
-// main.go 是 chase-code 命令行工具的入口文件。
-//
-// 职责：
-//  1. 定义 main 函数，作为整个程序的起始点。
-//  2. 将控制权转交给 cli.Run，由后者完成具体的命令行解析与业务逻辑。
+// main.go: chase-code 命令行工具入口。
+// 负责调用 cli.Run 启动命令行解析和执行逻辑。
 package main
 
 import "chase-code/cli"
 
-// main 是 chase-code 命令行工具的入口函数。
-// 这里不包含具体业务逻辑，只是简单地将控制权交给 cli.Run，
-// 由 cli 包负责解析命令行参数并执行相应的子命令。
+// main 为程序入口，交由 cli.Run 处理后续流程。
 func main() {
 	cli.Run()
 }
