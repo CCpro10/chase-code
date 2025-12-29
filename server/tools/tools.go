@@ -37,7 +37,9 @@ const (
 	ApplyPatchToolModeFunction ApplyPatchToolMode = "function"
 )
 
-const applyPatchFunctionDescription = `Use the apply_patch tool to edit files.
+const applyPatchFunctionDescription = `Patch text in apply_patch format (*** Begin Patch ... *** End Patch).`
+
+const applyPatchFunctionInputDescription = `Use the apply_patch tool to edit files.
 Provide the full patch text in the input field.
 Your patch language is a stripped-down, file-oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high-level envelope:
 
@@ -141,17 +143,24 @@ var (
   "additionalProperties": false
 }`)
 
-	toolParamsApplyPatch = json.RawMessage(`{
-  "type": "object",
-  "properties": {
-    "input": {
-      "type": "string",
-      "description": "The entire contents of the apply_patch command."
-    }
-  },
-  "required": ["input"],
-  "additionalProperties": false
-}`)
+	toolParamsApplyPatch = func() json.RawMessage {
+		params := map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"input": map[string]any{
+					"type":        "string",
+					"description": applyPatchFunctionInputDescription,
+				},
+			},
+			"required":             []string{"input"},
+			"additionalProperties": false,
+		}
+		data, err := json.Marshal(params)
+		if err != nil {
+			return json.RawMessage(`{"type":"object","properties":{"input":{"type":"string","description":"apply_patch input"}},"required":["input"],"additionalProperties":false}`)
+		}
+		return data
+	}()
 
 	toolFormatApplyPatch = json.RawMessage(`{
   "type": "grammar",

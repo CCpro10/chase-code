@@ -15,6 +15,7 @@ import (
 	"github.com/openai/openai-go/shared"
 	"github.com/openai/openai-go/shared/constant"
 
+	servertools "chase-code/server/tools"
 	"chase-code/server/utils"
 )
 
@@ -222,6 +223,7 @@ func (c *CompletionsClient) buildMessages(p Prompt) []openai.ChatCompletionMessa
 func (c *CompletionsClient) buildTools(tools []ToolSpec) []openai.ChatCompletionToolParam {
 	var sdkTools []openai.ChatCompletionToolParam
 	for _, t := range tools {
+		t = normalizeCompletionToolSpec(t)
 		if len(t.Parameters) == 0 || string(t.Parameters) == "null" {
 			continue
 		}
@@ -238,6 +240,14 @@ func (c *CompletionsClient) buildTools(tools []ToolSpec) []openai.ChatCompletion
 		}
 	}
 	return sdkTools
+}
+
+// normalizeCompletionToolSpec 将 custom 工具转换为 completions 可用的函数工具。
+func normalizeCompletionToolSpec(t ToolSpec) ToolSpec {
+	if t.Kind == servertools.ToolKindCustom && t.Name == "apply_patch" {
+		return servertools.ApplyPatchToolSpecFunction()
+	}
+	return t
 }
 
 func (c *CompletionsClient) extractToolCalls(calls []openai.ChatCompletionMessageToolCall) []ToolCall {
