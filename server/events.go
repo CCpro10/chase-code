@@ -14,12 +14,10 @@ const (
 	EventTurnError EventKind = "turn_error"
 
 	// LLM / Agent 相关
-	EventAgentThinking  EventKind = "agent_thinking"   // 准备调用 LLM
 	EventAgentTextDelta EventKind = "agent_text_delta" // 流式增量文本（当前未启用，仅预留）
 	EventAgentTextDone  EventKind = "agent_text_done"  // 一轮回答完成
 
 	// 工具调用相关
-	EventToolPlanned     EventKind = "tool_planned"      // 解析出了 tool_calls JSON 或自然语言规划
 	EventToolStarted     EventKind = "tool_started"      // 某个工具开始执行
 	EventToolOutputDelta EventKind = "tool_output_delta" // 工具输出的增量内容（当前一次性发送）
 	EventToolFinished    EventKind = "tool_finished"     // 某个工具执行结束

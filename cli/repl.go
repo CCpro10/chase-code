@@ -397,12 +397,6 @@ func handleCompactCommand(args []string) ([]string, error) {
 		return nil, err
 	}
 
-	// 发送思考事件以在界面上展示状态（如果支持）
-	sess.session.Sink.SendEvent(server.Event{
-		Kind: server.EventAgentThinking,
-		Time: time.Now(),
-	})
-
 	summary, err := sess.session.ManualCompactHistory(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("压缩失败: %v", err)

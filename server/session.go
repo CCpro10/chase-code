@@ -210,7 +210,6 @@ func (s *Session) runTurnStep(turn *turnContext, step int) (bool, error) {
 		return true, nil
 	}
 
-	s.emitToolPlan(step, reply)
 	s.executeToolCalls(turn.baseCtx, turn.cm, calls, step)
 
 	return false, nil
@@ -335,7 +334,6 @@ func (s *Session) ensureCallIDs(calls []servertools.ToolCall, step int) {
 
 // emitAgentThinking 发送 agent 思考事件。
 func (s *Session) emitAgentThinking(step int) {
-	s.Sink.SendEvent(Event{Kind: EventAgentThinking, Time: time.Now(), Step: step})
 }
 
 // emitFinalReply 发送最终回答事件并结束当前 turn。
@@ -347,16 +345,6 @@ func (s *Session) emitFinalReply(step int, reply string) {
 		Message: reply,
 	})
 	s.Sink.SendEvent(Event{Kind: EventTurnFinished, Time: time.Now(), Step: step})
-}
-
-// emitToolPlan 发送工具规划事件。
-func (s *Session) emitToolPlan(step int, reply string) {
-	s.Sink.SendEvent(Event{
-		Kind:    EventToolPlanned,
-		Time:    time.Now(),
-		Step:    step,
-		Message: reply,
-	})
 }
 
 // finishTurnDueToMaxSteps 在达到最大步数时输出终止事件。

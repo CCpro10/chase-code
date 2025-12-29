@@ -741,7 +741,7 @@ func (m *replModel) applyEvent(ev server.Event) []string {
 		lines := m.flushStreamFinal(ev.Message)
 		m.resetStreamState()
 		return lines
-	case server.EventToolPlanned, server.EventTurnError, server.EventTurnFinished:
+	case server.EventTurnError, server.EventTurnFinished:
 		m.resetStreamState()
 	}
 

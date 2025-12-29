@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -384,10 +385,6 @@ func formatEvent(ev server.Event) []string {
 		return formatTurnFinished(ev.Step, ev.Message)
 	case server.EventTurnError:
 		return formatTurnError(ev.Message)
-	case server.EventAgentThinking:
-		return formatAgentThinking(ev.Step)
-	case server.EventToolPlanned:
-		return formatToolPlanned(ev.Step, ev.Message)
 	case server.EventToolStarted:
 		return formatToolStarted(ev.ToolName)
 	case server.EventToolOutputDelta:
@@ -410,20 +407,6 @@ func formatTurnStarted() []string {
 	return []string{styleMagenta.Render("[turn] 开始")}
 }
 
-// formatAgentThinking 渲染思考阶段提示。
-func formatAgentThinking(step int) []string {
-	return []string{styleDim.Render(fmt.Sprintf("  [agent] 正在思考（step=%d）...", step))}
-}
-
-// formatToolPlanned 渲染工具规划事件。
-func formatToolPlanned(step int, message string) []string {
-	lines := []string{styleDim.Render(fmt.Sprintf("  [agent] 规划工具调用（step=%d）：", step))}
-	if strings.TrimSpace(message) == "" {
-		return lines
-	}
-	return append(lines, indentLines(message, 4)...)
-}
-
 // formatToolStarted 渲染工具开始执行事件。
 func formatToolStarted(toolName string) []string {
 	return []string{styleYellow.Render(fmt.Sprintf("    [tool %s] 开始执行", toolName))}
@@ -434,6 +417,9 @@ func formatToolOutput(toolName, message string) []string {
 	if strings.TrimSpace(message) == "" {
 		return nil
 	}
+	if toolName == "shell_command" || toolName == "shell" {
+		return formatShellToolOutput(message)
+	}
 	lines := []string{styleDim.Render(fmt.Sprintf("      [tool %s 输出]", toolName))}
 	body := message
 	if !shouldShowFullToolOutput(toolName, message) {
@@ -441,6 +427,53 @@ func formatToolOutput(toolName, message string) []string {
 		body = strings.Join(preview, "\n")
 	}
 	return append(lines, indentLines(body, 8)...)
+}
+
+// formatShellToolOutput 渲染 shell_command 的输出，突出命令与参数。
+func formatShellToolOutput(message string) []string {
+	output, summary := splitToolOutput(message)
+	command := parseShellCommand(summary)
+	header := "      " + command
+	lines := []string{styleDim.Render(header)}
+	body := output
+	if !shouldShowFullToolOutput("shell_command", output) {
+		preview := truncateToolOutputLines(output, toolOutputPreviewLines)
+		body = strings.Join(preview, "\n")
+	}
+	return append(lines, indentLines(body, 8)...)
+}
+
+// splitToolOutput 将工具输出拆分为正文与摘要（summary）。
+func splitToolOutput(message string) (string, string) {
+	parts := strings.SplitN(message, "\n---\n", 2)
+	output := strings.TrimRight(parts[0], "\n")
+	if len(parts) == 1 {
+		return output, ""
+	}
+	return output, strings.TrimSpace(parts[1])
+}
+
+// parseShellCommand 从 summary 中提取 command=... 信息。
+func parseShellCommand(summary string) string {
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return "(unknown)"
+	}
+	idx := strings.Index(summary, "command=")
+	if idx == -1 {
+		return summary
+	}
+	rest := summary[idx+len("command="):]
+	endIdx := strings.Index(rest, " exit_code=")
+	if endIdx == -1 {
+		endIdx = len(rest)
+	}
+	raw := strings.TrimSpace(rest[:endIdx])
+	unquoted, err := strconv.Unquote(raw)
+	if err != nil {
+		return raw
+	}
+	return unquoted
 }
 
 // formatToolFinished 渲染工具结束事件。
