@@ -412,6 +412,9 @@ func formatToolOutput(toolName, message string) []string {
 	if toolName == "shell_command" || toolName == "shell" {
 		return formatShellToolOutput(message)
 	}
+	if toolName == "apply_patch" {
+		return formatApplyPatchToolOutput(message)
+	}
 	lines := []string{styleDim.Render(fmt.Sprintf("    tool %s:", toolName))}
 	body := message
 	if !shouldShowFullToolOutput(toolName, message) {
@@ -421,6 +424,209 @@ func formatToolOutput(toolName, message string) []string {
 	bodyLines := indentLines(body, 6)
 	bodyLines = styleLines(bodyLines, styleToolOutput)
 	return append(lines, bodyLines...)
+}
+
+type applyPatchOp string
+
+const (
+	applyPatchOpAdd     applyPatchOp = "add"
+	applyPatchOpUpdate  applyPatchOp = "update"
+	applyPatchOpDelete  applyPatchOp = "delete"
+	applyPatchOpUnknown applyPatchOp = "unknown"
+)
+
+type applyPatchSection struct {
+	Path   string
+	MoveTo string
+	Op     applyPatchOp
+	Lines  []string
+}
+
+// formatApplyPatchToolOutput 将 apply_patch 输出优化为类似 shell 的展示风格。
+func formatApplyPatchToolOutput(message string) []string {
+	patchLines := extractApplyPatchLines(message)
+	if len(patchLines) == 0 {
+		return nil
+	}
+
+	sections := splitApplyPatchSections(patchLines)
+	if len(sections) == 0 {
+		return formatApplyPatchFallback(patchLines)
+	}
+
+	var out []string
+	for _, sec := range sections {
+		header := "    " + buildApplyPatchTitle(sec)
+		out = append(out, styleYellow.Render(header))
+		bodyLines := trimEdgeEmptyLines(sec.Lines)
+		if len(bodyLines) == 0 && sec.Op == applyPatchOpDelete {
+			bodyLines = []string{"(删除文件)"}
+		}
+		if len(bodyLines) == 0 {
+			continue
+		}
+		indented := indentLines(strings.Join(bodyLines, "\n"), 6)
+		out = append(out, styleApplyPatchLines(indented)...)
+	}
+	return out
+}
+
+// extractApplyPatchLines 从工具输出中提取补丁内容，隐藏无意义的头尾。
+func extractApplyPatchLines(message string) []string {
+	lines := splitLines(strings.TrimRight(message, "\n"))
+	if len(lines) == 0 {
+		return nil
+	}
+
+	start, end := -1, -1
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "*** Begin Patch") {
+			start = i + 1
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(line), "*** End Patch") {
+			end = i
+			break
+		}
+	}
+	if start >= 0 {
+		if end == -1 {
+			end = len(lines)
+		}
+		return trimEdgeEmptyLines(lines[start:end])
+	}
+
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "补丁内容:") {
+			return trimEdgeEmptyLines(lines[i+1:])
+		}
+	}
+
+	return trimEdgeEmptyLines(lines)
+}
+
+// splitApplyPatchSections 将补丁内容按文件拆分，便于展示。
+func splitApplyPatchSections(lines []string) []applyPatchSection {
+	var sections []applyPatchSection
+	var current *applyPatchSection
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			if current != nil {
+				current.Lines = append(current.Lines, line)
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "*** End of File") {
+			continue
+		}
+		if path, op, ok := parseApplyPatchFileHeader(trimmed); ok {
+			if current != nil {
+				sections = append(sections, *current)
+			}
+			current = &applyPatchSection{Path: path, Op: op}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "*** Move to: ") {
+			if current != nil {
+				current.MoveTo = strings.TrimSpace(strings.TrimPrefix(trimmed, "*** Move to: "))
+			}
+			continue
+		}
+		if current == nil {
+			current = &applyPatchSection{Op: applyPatchOpUnknown}
+		}
+		current.Lines = append(current.Lines, line)
+	}
+
+	if current != nil {
+		sections = append(sections, *current)
+	}
+	return sections
+}
+
+// parseApplyPatchFileHeader 解析 apply_patch 文件头行。
+func parseApplyPatchFileHeader(line string) (string, applyPatchOp, bool) {
+	const (
+		addPrefix    = "*** Add File: "
+		updatePrefix = "*** Update File: "
+		deletePrefix = "*** Delete File: "
+	)
+
+	switch {
+	case strings.HasPrefix(line, addPrefix):
+		return strings.TrimSpace(strings.TrimPrefix(line, addPrefix)), applyPatchOpAdd, true
+	case strings.HasPrefix(line, updatePrefix):
+		return strings.TrimSpace(strings.TrimPrefix(line, updatePrefix)), applyPatchOpUpdate, true
+	case strings.HasPrefix(line, deletePrefix):
+		return strings.TrimSpace(strings.TrimPrefix(line, deletePrefix)), applyPatchOpDelete, true
+	default:
+		return "", applyPatchOpUnknown, false
+	}
+}
+
+// buildApplyPatchTitle 生成 apply_patch 标题。
+func buildApplyPatchTitle(sec applyPatchSection) string {
+	path := sec.Path
+	if path == "" {
+		path = "文件"
+	}
+	if sec.MoveTo != "" && sec.MoveTo != sec.Path {
+		return fmt.Sprintf("Edit %s -> %s 文件", path, sec.MoveTo)
+	}
+	return fmt.Sprintf("Edit %s 文件", path)
+}
+
+// formatApplyPatchFallback 在无法解析文件段时提供兜底展示。
+func formatApplyPatchFallback(lines []string) []string {
+	header := styleYellow.Render("    Edit 文件")
+	trimmed := trimEdgeEmptyLines(lines)
+	if len(trimmed) == 0 {
+		return []string{header}
+	}
+	indented := indentLines(strings.Join(trimmed, "\n"), 6)
+	body := styleApplyPatchLines(indented)
+	return append([]string{header}, body...)
+}
+
+// styleApplyPatchLines 为补丁内容应用颜色。
+func styleApplyPatchLines(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		trimmed := strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(trimmed, "@@") {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(trimmed, "+"):
+			out = append(out, styleGreen.Render(line))
+		case strings.HasPrefix(trimmed, "-"):
+			out = append(out, styleError.Render(line))
+		default:
+			out = append(out, styleToolOutput.Render(line))
+		}
+	}
+	return out
+}
+
+// trimEdgeEmptyLines 移除首尾空白行，避免无意义输出。
+func trimEdgeEmptyLines(lines []string) []string {
+	start := 0
+	end := len(lines)
+	for start < end && strings.TrimSpace(lines[start]) == "" {
+		start++
+	}
+	for end > start && strings.TrimSpace(lines[end-1]) == "" {
+		end--
+	}
+	if start >= end {
+		return nil
+	}
+	return lines[start:end]
 }
 
 // formatShellToolOutput 渲染 shell_command 的输出，突出命令与参数。
