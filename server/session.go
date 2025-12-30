@@ -229,7 +229,7 @@ func (s *Session) callLLM(baseCtx context.Context, prompt Prompt, step int) (*ll
 	log.Printf("[agent] step=%d calling LLM (history_items=%d, prompt_msgs=%d)", step, len(prompt.Items), len(prompt.Messages))
 
 	// 为本次 LLM 调用单独设置超时，避免影响后续工具执行/审批流程。
-	llmCtx, cancelLLM := context.WithTimeout(baseCtx, 120*time.Second) // 增加超时以适应流式传输
+	llmCtx, cancelLLM := context.WithTimeout(baseCtx, 600*time.Second) // 增加超时以适应流式传输
 	defer cancelLLM()
 
 	stream := s.Client.Stream(llmCtx, prompt)
