@@ -41,6 +41,7 @@ func logRawResponse(status int, respBody []byte) {
 	log.Printf("[llm] raw response status=%d body_bytes=%d body=\n%s", status, len(respBody), string(respBody))
 }
 
+// newHTTPClient 构造带超时的 HTTP 客户端。
 func newHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{Timeout: timeout}
 }

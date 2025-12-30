@@ -6,7 +6,7 @@ import (
 	servertools "chase-code/server/tools"
 )
 
-// buildCustomToolPayload builds the raw JSON for a custom tool.
+// buildCustomToolPayload 生成 custom 工具需要的原始 JSON。
 func buildCustomToolPayload(t ToolSpec) (json.RawMessage, bool) {
 	if t.Kind != servertools.ToolKindCustom || len(t.Format) == 0 {
 		return nil, false

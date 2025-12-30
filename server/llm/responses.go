@@ -107,41 +107,11 @@ func (c *ResponsesClient) Stream(ctx context.Context, p Prompt) *LLMStream {
 	return stream
 }
 
+// buildParams 生成 Responses API 所需的参数。
 func (c *ResponsesClient) buildParams(p Prompt) responses.ResponseNewParams {
 	toolModes := buildToolCallModes(p.Tools)
-	inputItems := make([]responses.ResponseInputItemUnionParam, 0)
-
-	items := p.Items
-	if len(items) == 0 {
-		for _, m := range p.Messages {
-			items = append(items, ResponseItem{Type: ResponseItemMessage, Role: m.Role, Text: m.Content})
-		}
-	}
-
-	for _, it := range items {
-		switch it.Type {
-		case ResponseItemMessage:
-			if it.Text != "" || it.Role == RoleUser {
-				inputItems = append(inputItems, responses.ResponseInputItemParamOfMessage(it.Text, responses.EasyInputMessageRole(it.Role)))
-			}
-			if it.Role == RoleAssistant && len(it.ToolCalls) > 0 {
-				for _, call := range it.ToolCalls {
-					inputItems = append(inputItems, buildToolCallInputParam(call, toolModes))
-				}
-			}
-		case ResponseItemToolCall:
-			call := ToolCall{
-				ToolName:  it.ToolName,
-				Arguments: it.ToolArguments,
-				CallID:    it.CallID,
-			}
-			inputItems = append(inputItems, buildToolCallInputParam(call, toolModes))
-		case ResponseItemToolResult:
-			if it.ToolName != "" || it.ToolOutput != "" {
-				inputItems = append(inputItems, buildToolCallOutputParam(it.ToolName, it.CallID, truncateToolOutput(it.ToolOutput), toolModes))
-			}
-		}
-	}
+	items := normalizePromptItems(p)
+	inputItems := c.buildInputItems(items, toolModes)
 
 	params := responses.ResponseNewParams{
 		Model: shared.ResponsesModel(c.cfg.Model),
@@ -162,6 +132,49 @@ func (c *ResponsesClient) buildParams(p Prompt) responses.ResponseNewParams {
 	return params
 }
 
+// buildInputItems 将内部 ResponseItem 列表转换为 Responses API 的输入项。
+func (c *ResponsesClient) buildInputItems(items []ResponseItem, toolModes map[string]toolCallMode) []responses.ResponseInputItemUnionParam {
+	if len(items) == 0 {
+		return nil
+	}
+	inputItems := make([]responses.ResponseInputItemUnionParam, 0, len(items))
+
+	for _, it := range items {
+		switch it.Type {
+		case ResponseItemMessage:
+			if it.Role == RoleTool {
+				log.Printf("[llm] skip tool role message in responses input")
+				continue
+			}
+			if it.Text != "" || it.Role == RoleUser {
+				inputItems = append(inputItems, responses.ResponseInputItemParamOfMessage(it.Text, responses.EasyInputMessageRole(it.Role)))
+			}
+			if it.Role == RoleAssistant && len(it.ToolCalls) > 0 {
+				inputItems = appendToolCallInputs(inputItems, it.ToolCalls, toolModes)
+			}
+		case ResponseItemToolCall:
+			call := ToolCall{
+				ToolName:  it.ToolName,
+				Arguments: it.ToolArguments,
+				CallID:    it.CallID,
+			}
+			inputItems = appendToolCallInputs(inputItems, []ToolCall{call}, toolModes)
+		case ResponseItemToolResult:
+			if it.ToolName == "" && it.ToolOutput == "" {
+				continue
+			}
+			callID := strings.TrimSpace(it.CallID)
+			if callID == "" {
+				log.Printf("[llm] skip tool result: missing call_id")
+				continue
+			}
+			inputItems = append(inputItems, buildToolCallOutputParam(it.ToolName, callID, truncateToolOutput(it.ToolOutput), toolModes))
+		}
+	}
+
+	return inputItems
+}
+
 type toolCallMode string
 
 const (
@@ -169,6 +182,7 @@ const (
 	toolCallModeCustom   toolCallMode = "custom"
 )
 
+// buildToolCallModes 根据工具定义推导 function/custom 的调用模式。
 func buildToolCallModes(tools []ToolSpec) map[string]toolCallMode {
 	out := make(map[string]toolCallMode, len(tools))
 	for _, t := range tools {
@@ -187,6 +201,7 @@ func buildToolCallModes(tools []ToolSpec) map[string]toolCallMode {
 	return out
 }
 
+// resolveToolCallMode 优先根据 ToolCall 本身的 Kind 决定模式，再回退到工具表。
 func resolveToolCallMode(call ToolCall, modes map[string]toolCallMode) toolCallMode {
 	switch call.Kind {
 	case servertools.ToolKindCustom:
@@ -200,6 +215,7 @@ func resolveToolCallMode(call ToolCall, modes map[string]toolCallMode) toolCallM
 	return toolCallModeFunction
 }
 
+// resolveToolOutputMode 根据工具名决定输出模式。
 func resolveToolOutputMode(toolName string, modes map[string]toolCallMode) toolCallMode {
 	if mode, ok := modes[toolName]; ok {
 		return mode
@@ -207,18 +223,35 @@ func resolveToolOutputMode(toolName string, modes map[string]toolCallMode) toolC
 	return toolCallModeFunction
 }
 
+// appendToolCallInputs 将工具调用转换为 Responses API 输入项。
+func appendToolCallInputs(inputItems []responses.ResponseInputItemUnionParam, calls []ToolCall, toolModes map[string]toolCallMode) []responses.ResponseInputItemUnionParam {
+	for _, call := range calls {
+		if strings.TrimSpace(call.ToolName) == "" {
+			continue
+		}
+		if strings.TrimSpace(call.CallID) == "" {
+			log.Printf("[llm] skip tool call: missing call_id name=%s", call.ToolName)
+			continue
+		}
+		inputItems = append(inputItems, buildToolCallInputParam(call, toolModes))
+	}
+	return inputItems
+}
+
+// buildToolCallInputParam 构建工具调用输入项。
 func buildToolCallInputParam(call ToolCall, modes map[string]toolCallMode) responses.ResponseInputItemUnionParam {
 	mode := resolveToolCallMode(call, modes)
 	if mode == toolCallModeCustom {
 		return buildCustomToolCallInputParam(call)
 	}
 	return responses.ResponseInputItemParamOfFunctionCall(
-		string(call.Arguments),
+		formatFunctionCallArguments(call.Arguments),
 		call.CallID,
 		call.ToolName,
 	)
 }
 
+// buildToolCallOutputParam 构建工具调用输出项。
 func buildToolCallOutputParam(toolName, callID, output string, modes map[string]toolCallMode) responses.ResponseInputItemUnionParam {
 	mode := resolveToolOutputMode(toolName, modes)
 	if mode == toolCallModeCustom {
@@ -227,18 +260,19 @@ func buildToolCallOutputParam(toolName, callID, output string, modes map[string]
 	return responses.ResponseInputItemParamOfFunctionCallOutput(callID, output)
 }
 
+// buildCustomToolCallInputParam 构建 custom_tool_call 输入项。
 func buildCustomToolCallInputParam(call ToolCall) responses.ResponseInputItemUnionParam {
 	payload := map[string]any{
 		"type":    "custom_tool_call",
 		"name":    call.ToolName,
 		"call_id": call.CallID,
 		// custom 工具使用 input 字段承载原始负载。
-		"input": json.RawMessage(call.Arguments),
+		"input": normalizeSDKArguments(call.Arguments),
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return responses.ResponseInputItemParamOfFunctionCall(
-			string(call.Arguments),
+			formatFunctionCallArguments(call.Arguments),
 			call.CallID,
 			call.ToolName,
 		)
@@ -246,6 +280,7 @@ func buildCustomToolCallInputParam(call ToolCall) responses.ResponseInputItemUni
 	return param.Override[responses.ResponseInputItemUnionParam](json.RawMessage(data))
 }
 
+// buildCustomToolCallOutputParam 构建 custom_tool_call_output 输出项。
 func buildCustomToolCallOutputParam(callID, output string) responses.ResponseInputItemUnionParam {
 	payload := map[string]any{
 		"type":    "custom_tool_call_output",
@@ -259,6 +294,7 @@ func buildCustomToolCallOutputParam(callID, output string) responses.ResponseInp
 	return param.Override[responses.ResponseInputItemUnionParam](json.RawMessage(data))
 }
 
+// buildTools 将工具定义转换为 Responses API 需要的格式。
 func (c *ResponsesClient) buildTools(tools []ToolSpec) []responses.ToolUnionParam {
 	var sdkTools []responses.ToolUnionParam
 	for _, t := range tools {
@@ -270,24 +306,27 @@ func (c *ResponsesClient) buildTools(tools []ToolSpec) []responses.ToolUnionPara
 			continue
 		}
 		var paramsMap map[string]any
-		if err := json.Unmarshal(t.Parameters, &paramsMap); err == nil {
-			strictValue := true
-			if t.Strict != nil {
-				strictValue = *t.Strict
-			}
-			sdkTools = append(sdkTools, responses.ToolUnionParam{
-				OfFunction: &responses.FunctionToolParam{
-					Name:        t.Name,
-					Description: param.NewOpt(t.Description),
-					Parameters:  paramsMap,
-					Strict:      param.NewOpt(strictValue),
-				},
-			})
+		if err := json.Unmarshal(t.Parameters, &paramsMap); err != nil {
+			log.Printf("[llm] skip tool %s: invalid parameters: %v", t.Name, err)
+			continue
 		}
+		strictValue := true
+		if t.Strict != nil {
+			strictValue = *t.Strict
+		}
+		sdkTools = append(sdkTools, responses.ToolUnionParam{
+			OfFunction: &responses.FunctionToolParam{
+				Name:        t.Name,
+				Description: param.NewOpt(t.Description),
+				Parameters:  paramsMap,
+				Strict:      param.NewOpt(strictValue),
+			},
+		})
 	}
 	return sdkTools
 }
 
+// extractOutput 提取 Responses 输出中的文本与工具调用。
 func (c *ResponsesClient) extractOutput(output []responses.ResponseOutputItemUnion) (string, []ToolCall) {
 	var texts []string
 	var calls []ToolCall
@@ -302,6 +341,7 @@ func (c *ResponsesClient) extractOutput(output []responses.ResponseOutputItemUni
 	return strings.Join(texts, "\n"), calls
 }
 
+// extractText 提取 assistant 的文本内容。
 func (c *ResponsesClient) extractText(content []responses.ResponseOutputMessageContentUnion, role string) string {
 	if role != string(constant.Assistant("assistant")) {
 		return ""
@@ -375,23 +415,4 @@ func (c *ResponsesClient) parseCustomToolCall(item responses.ResponseOutputItemU
 		Arguments: normalizeSDKArguments(args),
 		CallID:    callID,
 	}, true
-}
-
-func normalizeSDKArguments(args json.RawMessage) json.RawMessage {
-	if len(args) == 0 {
-		return json.RawMessage("{}")
-	}
-	var s string
-	if err := json.Unmarshal(args, &s); err == nil {
-		s = strings.TrimSpace(s)
-		if s == "" {
-			return json.RawMessage("{}")
-		}
-		if json.Valid([]byte(s)) {
-			return json.RawMessage(s)
-		}
-		quoted, _ := json.Marshal(s)
-		return json.RawMessage(quoted)
-	}
-	return args
 }

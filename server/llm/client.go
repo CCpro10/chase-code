@@ -68,6 +68,7 @@ func resolveLogFilePath() string {
 	return filepath.Join(cwd, ".chase-code", "logs", fmt.Sprintf("chase-code-%s.log", newSessionID()))
 }
 
+// newSessionID 生成用于日志文件的会话标识。
 func newSessionID() string {
 	now := time.Now()
 	datePart := now.Format("20060102-150405")
@@ -75,5 +76,3 @@ func newSessionID() string {
 	randPart := rnd.Intn(10000)
 	return fmt.Sprintf("%s-%04d", datePart, randPart)
 }
-
-// newSessionID 生成用于日志文件的会话标识。

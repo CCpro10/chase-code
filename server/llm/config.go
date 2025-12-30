@@ -63,6 +63,8 @@ type modelEntry struct {
 	err       error
 }
 
+type modelClientBuilder func(clientConfig) LLMClient
+
 // Init 初始化 LLM 配置，通常在应用启动时调用。
 func Init() error {
 	_, err := NewLLMModelsFromEnv()
@@ -109,6 +111,7 @@ func FindModel(alias string) (*LLMModel, error) {
 	return nil, fmt.Errorf("未找到别名为 %s 的模型", alias)
 }
 
+// loadLLMModelsFromEnv 实际执行模型加载逻辑。
 func loadLLMModelsFromEnv() (*LLMModels, error) {
 	env := config.Get()
 	entries := []modelEntry{
@@ -139,47 +142,53 @@ func loadLLMModelsFromEnv() (*LLMModels, error) {
 	return &LLMModels{All: all, Current: current}, nil
 }
 
+// buildFileModelEntry 从配置文件模型条目构建 modelEntry。
 func buildFileModelEntry(m config.Model) modelEntry {
-	var cfg clientConfig
-	var client LLMClient
-
-	if m.Completions != nil {
-		cfg = clientConfig{
-			Alias:   m.Name,
-			Model:   m.Completions.Model,
-			BaseURL: m.Completions.BaseURL,
-			APIKey:  m.Completions.APIKey,
-			Timeout: defaultTimeout,
-		}
-		client = NewCompletionsClient(cfg)
-	} else if m.Claude != nil {
-		cfg = clientConfig{
-			Alias:   m.Name,
-			Model:   m.Claude.Model,
-			BaseURL: m.Claude.BaseURL,
-			APIKey:  m.Claude.APIKey,
-			Timeout: defaultTimeout,
-		}
-		// Claude 目前也尝试使用 CompletionsClient (OpenAI 兼容模式)
-		client = NewCompletionsClient(cfg)
-	} else if m.Responses != nil {
-		cfg = clientConfig{
-			Alias:   m.Name,
-			Model:   m.Responses.Model,
-			BaseURL: m.Responses.BaseURL,
-			APIKey:  m.Responses.APIKey,
-			Timeout: defaultTimeout,
-		}
-		// 使用 ResponsesClient
-		client = NewResponsesClient(cfg)
-	} else {
-		return modelEntry{alias: m.Name, err: fmt.Errorf("模型 %s 缺少配置内容", m.Name)}
+	cfg, client, err := buildClientFromModelConfig(m)
+	if err != nil {
+		return modelEntry{alias: m.Name, err: err}
 	}
 
 	return modelEntry{
 		alias:     cfg.Alias,
 		modelName: cfg.Model,
 		model:     modelFromConfig(cfg, client),
+	}
+}
+
+// buildClientFromModelConfig 从配置文件模型条目创建 clientConfig 和 LLMClient。
+func buildClientFromModelConfig(m config.Model) (clientConfig, LLMClient, error) {
+	switch {
+	case m.Completions != nil:
+		cfg := clientConfig{
+			Alias:   m.Name,
+			Model:   strings.TrimSpace(m.Completions.Model),
+			BaseURL: strings.TrimSpace(m.Completions.BaseURL),
+			APIKey:  strings.TrimSpace(m.Completions.APIKey),
+			Timeout: defaultTimeout,
+		}
+		return cfg, NewCompletionsClient(cfg), nil
+	case m.Claude != nil:
+		cfg := clientConfig{
+			Alias:   m.Name,
+			Model:   strings.TrimSpace(m.Claude.Model),
+			BaseURL: strings.TrimSpace(m.Claude.BaseURL),
+			APIKey:  strings.TrimSpace(m.Claude.APIKey),
+			Timeout: defaultTimeout,
+		}
+		// Claude 暂走 OpenAI 兼容的 Completions 接口。
+		return cfg, NewCompletionsClient(cfg), nil
+	case m.Responses != nil:
+		cfg := clientConfig{
+			Alias:   m.Name,
+			Model:   strings.TrimSpace(m.Responses.Model),
+			BaseURL: strings.TrimSpace(m.Responses.BaseURL),
+			APIKey:  strings.TrimSpace(m.Responses.APIKey),
+			Timeout: defaultTimeout,
+		}
+		return cfg, NewResponsesClient(cfg), nil
+	default:
+		return clientConfig{}, nil, fmt.Errorf("模型 %s 缺少配置内容", m.Name)
 	}
 }
 
@@ -195,6 +204,7 @@ func NewLLMModelFromEnv() (*LLMModel, error) {
 	return models.Current, nil
 }
 
+// collectAvailableModels 收集加载成功的模型列表。
 func collectAvailableModels(entries []modelEntry) []*LLMModel {
 	out := make([]*LLMModel, 0, len(entries))
 	for _, entry := range entries {
@@ -205,6 +215,7 @@ func collectAvailableModels(entries []modelEntry) []*LLMModel {
 	return out
 }
 
+// selectModel 根据 alias 或模型名称选择模型。
 func selectModel(entries []modelEntry, desired string) (*LLMModel, error) {
 	desired = strings.TrimSpace(desired)
 	if desired == "" {
@@ -251,6 +262,36 @@ func selectModel(entries []modelEntry, desired string) (*LLMModel, error) {
 	}
 }
 
+// buildEnvEntry 根据环境变量构造默认模型 entry。
+func buildEnvEntry(alias, modelName, baseURL, apiKey, cacheKey string, builder modelClientBuilder, missingKeyErr error) modelEntry {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return modelEntry{alias: alias, modelName: modelName, err: missingKeyErr}
+	}
+
+	cfg := clientConfig{
+		Alias:    alias,
+		Model:    modelName,
+		BaseURL:  baseURL,
+		APIKey:   apiKey,
+		CacheKey: strings.TrimSpace(cacheKey),
+		Timeout:  defaultTimeout,
+	}
+	client := builder(cfg)
+	return modelEntry{alias: cfg.Alias, modelName: modelName, model: modelFromConfig(cfg, client)}
+}
+
+// buildCompletionsClient 适配构造 CompletionsClient 的 builder。
+func buildCompletionsClient(cfg clientConfig) LLMClient {
+	return NewCompletionsClient(cfg)
+}
+
+// buildResponsesClient 适配构造 ResponsesClient 的 builder。
+func buildResponsesClient(cfg clientConfig) LLMClient {
+	return NewResponsesClient(cfg)
+}
+
+// buildOpenAIEntry 构造 OpenAI 默认模型 entry。
 func buildOpenAIEntry(env *config.Config) modelEntry {
 	modelName := defaultOpenAIModel
 	if strings.TrimSpace(env.OpenAIModel) != "" {
@@ -261,21 +302,18 @@ func buildOpenAIEntry(env *config.Config) modelEntry {
 		baseURL = strings.TrimSpace(env.OpenAIBaseURL)
 	}
 	apiKey := strings.TrimSpace(env.OpenAIAPIKey)
-	if apiKey == "" {
-		return modelEntry{alias: defaultAliasOpenAI, modelName: modelName, err: errors.New("缺少环境变量 CHASE_CODE_OPENAI_API_KEY")}
-	}
-
-	cfg := clientConfig{
-		Alias:   defaultAliasOpenAI,
-		Model:   modelName,
-		BaseURL: baseURL,
-		APIKey:  apiKey,
-		Timeout: defaultTimeout,
-	}
-	client := NewCompletionsClient(cfg)
-	return modelEntry{alias: cfg.Alias, modelName: modelName, model: modelFromConfig(cfg, client)}
+	return buildEnvEntry(
+		defaultAliasOpenAI,
+		modelName,
+		baseURL,
+		apiKey,
+		"",
+		buildCompletionsClient,
+		errors.New("缺少环境变量 CHASE_CODE_OPENAI_API_KEY"),
+	)
 }
 
+// buildKimiEntry 构造 Kimi 默认模型 entry。
 func buildKimiEntry(env *config.Config) modelEntry {
 	modelName := defaultKimiModel
 	if strings.TrimSpace(env.KimiModel) != "" {
@@ -289,21 +327,18 @@ func buildKimiEntry(env *config.Config) modelEntry {
 	if apiKey == "" {
 		apiKey = strings.TrimSpace(env.MoonshotAPIKey)
 	}
-	if apiKey == "" {
-		return modelEntry{alias: defaultAliasKimi, modelName: modelName, err: errors.New("缺少环境变量 CHASE_CODE_KIMI_API_KEY 或 MOONSHOT_API_KEY")}
-	}
-
-	cfg := clientConfig{
-		Alias:   defaultAliasKimi,
-		Model:   modelName,
-		BaseURL: baseURL,
-		APIKey:  apiKey,
-		Timeout: defaultTimeout,
-	}
-	client := NewCompletionsClient(cfg)
-	return modelEntry{alias: cfg.Alias, modelName: modelName, model: modelFromConfig(cfg, client)}
+	return buildEnvEntry(
+		defaultAliasKimi,
+		modelName,
+		baseURL,
+		apiKey,
+		"",
+		buildCompletionsClient,
+		errors.New("缺少环境变量 CHASE_CODE_KIMI_API_KEY 或 MOONSHOT_API_KEY"),
+	)
 }
 
+// buildCocoEntry 构造 Coco 默认模型 entry。
 func buildCocoEntry(env *config.Config) modelEntry {
 	modelName := defaultCocoModel
 	if strings.TrimSpace(env.CocoModel) != "" {
@@ -314,25 +349,19 @@ func buildCocoEntry(env *config.Config) modelEntry {
 		baseURL = strings.TrimSpace(env.CocoBaseURL)
 	}
 	jwtKey := strings.TrimSpace(env.CocoJWTKey)
-	if jwtKey == "" {
-		return modelEntry{alias: defaultAliasCoco, modelName: modelName, err: errors.New("缺少环境变量 cocojwtkey")}
-	}
 	cacheKey := strings.TrimSpace(env.CocoCacheKey)
-
-	cfg := clientConfig{
-		Alias:   defaultAliasCoco,
-		Model:   modelName,
-		BaseURL: baseURL,
-		APIKey:  jwtKey,
-		Timeout: defaultTimeout,
-	}
-	if cacheKey != "" {
-		cfg.CacheKey = cacheKey
-	}
-	client := NewResponsesClient(cfg)
-	return modelEntry{alias: cfg.Alias, modelName: modelName, model: modelFromConfig(cfg, client)}
+	return buildEnvEntry(
+		defaultAliasCoco,
+		modelName,
+		baseURL,
+		jwtKey,
+		cacheKey,
+		buildResponsesClient,
+		errors.New("缺少环境变量 cocojwtkey"),
+	)
 }
 
+// modelFromConfig 将 clientConfig 写回到 LLMModel 结构。
 func modelFromConfig(cfg clientConfig, client LLMClient) *LLMModel {
 	return &LLMModel{
 		Client:   client,
