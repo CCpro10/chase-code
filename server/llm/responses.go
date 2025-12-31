@@ -40,7 +40,7 @@ func (c *ResponsesClient) Complete(ctx context.Context, p Prompt) (*LLMResult, e
 	resp, err := c.client.Responses.New(ctx, c.buildParams(p))
 	if err != nil {
 		log.Printf("[llm] Responses API error: %v (elapsed=%s)", err, time.Since(start))
-		return nil, err
+		return nil, wrapNetworkError(err)
 	}
 
 	text, calls := c.extractOutput(resp.Output)
@@ -91,7 +91,7 @@ func (c *ResponsesClient) Stream(ctx context.Context, p Prompt) *LLMStream {
 
 		if err := s.Err(); err != nil {
 			log.Printf("[llm] stream error: %v", err)
-			ch <- LLMEvent{Kind: LLMEventError, Error: err}
+			ch <- LLMEvent{Kind: LLMEventError, Error: wrapNetworkError(err)}
 			return
 		}
 

@@ -43,7 +43,7 @@ func (c *CompletionsClient) Complete(ctx context.Context, p Prompt) (*LLMResult,
 	resp, err := c.client.Chat.Completions.New(ctx, params)
 	if err != nil {
 		log.Printf("[llm] Completions API error: %v (elapsed=%s)", err, time.Since(start))
-		return nil, err
+		return nil, wrapNetworkError(err)
 	}
 
 	if len(resp.Choices) == 0 {
@@ -94,7 +94,7 @@ func (c *CompletionsClient) Stream(ctx context.Context, p Prompt) *LLMStream {
 
 		if err := s.Err(); err != nil {
 			log.Printf("[llm] stream error: %v", err)
-			ch <- LLMEvent{Kind: LLMEventError, Error: err}
+			ch <- LLMEvent{Kind: LLMEventError, Error: wrapNetworkError(err)}
 			return
 		}
 

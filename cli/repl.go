@@ -482,8 +482,19 @@ func emitAgentTurnError(sess *replAgentSession, err error) {
 	sess.session.Sink.SendEvent(server.Event{
 		Kind:    server.EventTurnError,
 		Time:    time.Now(),
-		Message: fmt.Sprintf("agent 执行失败: %v", err),
+		Message: formatAgentTurnError(err),
 	})
+}
+
+// formatAgentTurnError 根据错误类型生成给用户的提示信息。
+func formatAgentTurnError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if llm.IsNetworkError(err) {
+		return fmt.Sprintf("网络错误：无法连接 LLM 服务，请检查网络或代理配置后重试（%v）", err)
+	}
+	return fmt.Sprintf("agent 执行失败: %v", err)
 }
 
 // hasCommandPrefix 判断输入是否以命令前缀开头。
